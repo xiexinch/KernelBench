@@ -118,7 +118,9 @@ def _run_measure_with_timeout(work_item: tuple, timeout: int) -> tuple:
         if p.is_alive():
             p.kill()
             p.join(timeout=5)
-        print(f"[WARNING] Measurement TIMED OUT ({timeout}s) for {ref_arch_name}, skipping")
+        print(
+            f"[WARNING] Measurement TIMED OUT ({timeout}s) for {ref_arch_name}, skipping"
+        )
         return (ref_arch_name, None)
     try:
         return result_queue.get_nowait()
@@ -141,7 +143,9 @@ def record_baseline_times_resume(
     When num_gpus > 1, runs measurements in parallel across GPUs (batch size = num_gpus).
     When timeout > 0, each operator measurement is limited to timeout seconds; hung process is terminated.
     """
-    num_gpus = max(1, min(num_gpus, torch.cuda.device_count() if torch.cuda.is_available() else 1))
+    num_gpus = max(
+        1, min(num_gpus, torch.cuda.device_count() if torch.cuda.is_available() else 1)
+    )
     save_path = os.path.join(TIMING_DIR, file_name)
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
@@ -157,7 +161,7 @@ def record_baseline_times_resume(
         precision,
     )
 
-    for level in [1, 2, 3]:
+    for level in [1, 2, 3, 4]:
         level_key = f"level{level}"
         if level_key not in json_results:
             json_results[level_key] = {}
@@ -176,7 +180,9 @@ def record_baseline_times_resume(
                 to_measure.append((ref_arch_name, ref_arch_src))
 
         if not to_measure:
-            print(f"[{level_key}] All {total} problems already have valid results, skipping.")
+            print(
+                f"[{level_key}] All {total} problems already have valid results, skipping."
+            )
             continue
 
         timeout_str = f", timeout={timeout}s" if timeout > 0 else ""
@@ -321,7 +327,9 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         n_dev = torch.cuda.device_count()
         if num_gpus > n_dev:
-            print(f"[WARNING] num_gpus={num_gpus} > available {n_dev}, using num_gpus={n_dev}")
+            print(
+                f"[WARNING] num_gpus={num_gpus} > available {n_dev}, using num_gpus={n_dev}"
+            )
             num_gpus = n_dev
     else:
         if num_gpus > 1:
