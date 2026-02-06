@@ -88,23 +88,28 @@ def _measure_one_worker(args) -> tuple:
         return (ref_arch_name, None)
 
 
+def _measure_worker_with_queue(work_item: tuple, result_queue: mp.Queue) -> None:
+    """
+    Module-level worker for Process: run _measure_one_worker and put result in queue.
+    Must be at module level for picklability (spawn context).
+    """
+    ref_arch_name = work_item[0]
+    try:
+        r = _measure_one_worker(work_item)
+        result_queue.put(r)
+    except Exception:
+        result_queue.put((ref_arch_name, None))
+
+
 def _run_measure_with_timeout(work_item: tuple, timeout: int) -> tuple:
     """
     Run _measure_one_worker in a subprocess with timeout.
     If timeout, terminate the process and return (ref_arch_name, None).
     """
     ref_arch_name = work_item[0]
-    result_queue = mp.Queue()
-
-    def _worker():
-        try:
-            r = _measure_one_worker(work_item)
-            result_queue.put(r)
-        except Exception as e:
-            result_queue.put((ref_arch_name, None))
-
     ctx = mp.get_context("spawn")
-    p = ctx.Process(target=_worker)
+    result_queue = ctx.Queue()
+    p = ctx.Process(target=_measure_worker_with_queue, args=(work_item, result_queue))
     p.start()
     p.join(timeout=timeout)
     if p.is_alive():
