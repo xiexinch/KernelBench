@@ -41,9 +41,9 @@ class AnalysisConfig(Config):
         self.baseline = REQUIRED  # baseline to compare against
 
         # Optional path overrides (defaults to standard KernelBench paths)
-        self.baseline_file = None      # Override: direct path to baseline JSON
-        self.eval_results_dir = None   # Override: path to runs directory
-        self.output_file = None        # Write JSON output to file
+        self.baseline_file = None  # Override: direct path to baseline JSON
+        self.eval_results_dir = None  # Override: path to runs directory
+        self.output_file = None  # Write JSON output to file
 
     def __repr__(self):
         return f"AnalysisConfig({self.to_dict()})"
@@ -67,8 +67,9 @@ def patch(eval_results, dataset):
     return eval_results
 
 
-def analyze_greedy_eval(run_name, hardware, baseline, level,
-                        baseline_file=None, eval_results_dir=None) -> dict:
+def analyze_greedy_eval(
+    run_name, hardware, baseline, level, baseline_file=None, eval_results_dir=None
+) -> dict:
     """
     Analyze the greedy eval results for a run of a particular level.
 
@@ -80,7 +81,9 @@ def analyze_greedy_eval(run_name, hardware, baseline, level,
     # Resolve eval results path (use override if provided)
     if eval_results_dir:
         eval_file_path = os.path.join(eval_results_dir, run_name, "eval_results.json")
-        pass_at_k_file_path = os.path.join(eval_results_dir, run_name, "pass_at_k_results.json")
+        pass_at_k_file_path = os.path.join(
+            eval_results_dir, run_name, "pass_at_k_results.json"
+        )
     else:
         eval_file_path = f"runs/{run_name}/eval_results.json"
         pass_at_k_file_path = f"runs/{run_name}/pass_at_k_results.json"
@@ -174,17 +177,20 @@ def analyze_greedy_eval(run_name, hardware, baseline, level,
             print(f"Warning: Problem {pid} not found in eval results")
             continue
         eval_entry = eval_results[str(pid)]
-        
+
         # Get baseline result
         problem = dataset.get_problem_by_id(pid)
         problem_name = problem.name
-        
+
         if problem_name not in baseline_results[f"level{level}"]:
             print(f"Warning: Problem {problem_name} not found in baseline results")
             continue
-            
+
         baseline_entry = baseline_results[f"level{level}"][problem_name]
-        
+        if baseline_entry is None:
+            print(f"Warning: Baseline entry for {problem_name} is None")
+            continue
+
         is_correct_list.append(eval_entry["correctness"])
         actual_speed_list.append(eval_entry["runtime"])
         baseline_speed_list.append(baseline_entry["mean"])
@@ -215,7 +221,9 @@ def analyze_greedy_eval(run_name, hardware, baseline, level,
     print("\nFast_p Results:")
     print(
         tabulate(
-            fast_p_results, headers=["Speedup Threshold (p)", "Fast_p Score"], tablefmt="grid"
+            fast_p_results,
+            headers=["Speedup Threshold (p)", "Fast_p Score"],
+            tablefmt="grid",
         )
     )
 
@@ -258,7 +266,7 @@ def analyze_greedy_eval(run_name, hardware, baseline, level,
     if pass_at_k_results:
         results["pass_at_k"] = {
             "metadata": pass_at_k_results.get("metadata", {}),
-            "averages": pass_at_k_results.get("averages", {})
+            "averages": pass_at_k_results.get("averages", {}),
         }
 
     return results
@@ -272,12 +280,12 @@ def main(config: AnalysisConfig):
         config.baseline,
         config.level,
         baseline_file=config.baseline_file,
-        eval_results_dir=config.eval_results_dir
+        eval_results_dir=config.eval_results_dir,
     )
 
     # Write JSON output if requested
     if config.output_file:
-        with open(config.output_file, 'w') as f:
+        with open(config.output_file, "w") as f:
             json.dump(results, f, indent=2)
         print(f"\nResults written to: {config.output_file}")
 
