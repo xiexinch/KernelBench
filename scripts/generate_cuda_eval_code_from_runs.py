@@ -1,7 +1,8 @@
 import argparse
 import os
 from litellm import completion
-from dotenv import load_dotenv
+from dotenv import load_dotenv\
+from string import Template
 
 load_dotenv()
 
@@ -79,7 +80,7 @@ def extract_kernel_code(
 
 
 # one-shot template for generate c++ entry code
-one_shot_template = """You are a CUDA expert. Your task is to generate a c++ entry code for the given kernel code and torch::Tensor entry code. You should follow the following rules:
+one_shot_template = Template("""You are a CUDA expert. Your task is to generate a c++ entry code for the given kernel code and torch::Tensor entry code. You should follow the following rules:
 - You should use the original kernel code and torch::Tensor entry code as a reference.
 - You should generate the entry code that is compatible with the torch::Tensor entry code.
 - You should write the entry code with the original kernel code
@@ -91,8 +92,8 @@ one_shot_template = """You are a CUDA expert. Your task is to generate a c++ ent
 
 You are given the following kernel code and torch::Tensor entry code:
 ```cpp
-{kernel_code}
-{entry_code}
+${kernel_code}
+${entry_code}
 ```
 
 Your example entry code:
@@ -119,7 +120,7 @@ void test_tmp_kernel_ori(
     leaky_relu_kernel_ori<<<num_blocks, block_size>>>(input, output,negative_slope, size);
 }
 ```
-"""
+""")
 
 
 def make_prompt(macro_code: str, kernel_code: str, entry_code: str) -> str:
