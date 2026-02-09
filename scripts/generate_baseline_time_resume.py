@@ -5,6 +5,7 @@ Based on generate_baseline_time.py, adds:
 - Resume: load existing results, skip problems that already have valid results
 - Only measure failed (null) or missing problems
 - Merge new results with existing and save
+- levels: specify which levels to measure (e.g., --levels 1 2 4)
 - num_gpus: parallel measurement across multiple GPUs
 - timeout: per-operator timeout, terminate hung process
 """
@@ -14,6 +15,7 @@ import numpy as np
 import multiprocessing as mp
 import threading
 from queue import Queue, Empty
+from typing import Optional
 from kernelbench.dataset import (
     construct_kernelbench_dataset,
     fetch_ref_arch_from_dataset,
@@ -136,13 +138,17 @@ def record_baseline_times_resume(
     precision: str = "fp32",
     num_gpus: int = 1,
     timeout: int = 0,
+    levels: Optional[list[int]] = None,
 ):
     """
     Generate baseline time for KernelBench with resume support.
     Loads existing results, skips problems with valid results, only measures failed/missing.
     When num_gpus > 1, runs measurements in parallel across GPUs (batch size = num_gpus).
     When timeout > 0, each operator measurement is limited to timeout seconds; hung process is terminated.
+    When levels is specified, only measure those levels (e.g., [1, 2, 4]); default is [1, 2, 3, 4].
     """
+    if levels is None:
+        levels = [1, 2, 3, 4]
     num_gpus = max(
         1, min(num_gpus, torch.cuda.device_count() if torch.cuda.is_available() else 1)
     )
@@ -161,7 +167,7 @@ def record_baseline_times_resume(
         precision,
     )
 
-    for level in [1, 2, 3, 4]:
+    for level in levels:
         level_key = f"level{level}"
         if level_key not in json_results:
             json_results[level_key] = {}
@@ -317,12 +323,20 @@ if __name__ == "__main__":
         default=0,
         help="Per-operator timeout in seconds. If exceeded, terminate the process and record as failed. 0 = no timeout (default).",
     )
+    parser.add_argument(
+        "--levels",
+        type=int,
+        nargs="+",
+        default=None,
+        help="KernelBench levels to measure (e.g., --levels 1 2 4). Default: 1 2 3 4.",
+    )
     args = parser.parse_args()
 
     hardware_name = args.hardware_name
     num_gpus = args.num_gpus
     precision = args.precision
     timeout = max(0, args.timeout)
+    levels = args.levels
 
     if torch.cuda.is_available():
         n_dev = torch.cuda.device_count()
@@ -337,8 +351,9 @@ if __name__ == "__main__":
         num_gpus = 1
 
     timeout_str = f", timeout={timeout}s" if timeout > 0 else ""
+    levels_str = f"levels={levels}" if levels else "levels=1,2,3,4"
     input(
-        f"You are about to start recording baseline time for {hardware_name} (with resume, num_gpus={num_gpus}{timeout_str}). "
+        f"You are about to start recording baseline time for {hardware_name} ({levels_str}, resume, num_gpus={num_gpus}{timeout_str}). "
         f"Press Enter to continue..."
     )
 
@@ -348,15 +363,20 @@ if __name__ == "__main__":
             f"📁 Found existing results in {save_dir}. Will resume - only measure failed/missing problems."
         )
 
+    resume_kwargs = dict(
+        precision=precision,
+        num_gpus=num_gpus,
+        timeout=timeout,
+        levels=levels,
+    )
+
     # 1. Record Torch Eager
     record_baseline_times_resume(
         use_torch_compile=False,
         torch_compile_backend=None,
         torch_compile_options=None,
         file_name=f"{hardware_name}/baseline_time_torch.json",
-        precision=precision,
-        num_gpus=num_gpus,
-        timeout=timeout,
+        **resume_kwargs,
     )
 
     # 2. Record Torch Compile using Inductor
@@ -371,9 +391,7 @@ if __name__ == "__main__":
             torch_compile_backend="inductor",
             torch_compile_options=torch_compile_mode,
             file_name=f"{hardware_name}/baseline_time_torch_compile_inductor_{torch_compile_mode}.json",
-            precision=precision,
-            num_gpus=num_gpus,
-            timeout=timeout,
+            **resume_kwargs,
         )
 
     # 3. Record Torch Compile using cudagraphs
@@ -382,9 +400,7 @@ if __name__ == "__main__":
         torch_compile_backend="cudagraphs",
         torch_compile_options=None,
         file_name=f"{hardware_name}/baseline_time_torch_compile_cudagraphs.json",
-        precision=precision,
-        num_gpus=num_gpus,
-        timeout=timeout,
+        **resume_kwargs,
     )
 
     print(f"\n✅ Baseline time saved to {save_dir}")
