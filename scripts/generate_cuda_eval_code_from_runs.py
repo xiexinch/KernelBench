@@ -1,7 +1,7 @@
 import argparse
 import os
 from litellm import completion
-from dotenv import load_dotenv\
+from dotenv import load_dotenv
 from string import Template
 
 load_dotenv()
