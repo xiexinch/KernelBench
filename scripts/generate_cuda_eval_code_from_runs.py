@@ -154,11 +154,14 @@ def main():
             api_key=ANTHROPIC_API_KEY,
         )
         eval_code = response.choices[0].message.content
+        if not eval_code.startswith("```cpp"):
+            print(f"Warning: Generated eval code does not valid c++ code, skipping problem {problem_id}")
+            continue
+        eval_code = eval_code.replace("```cpp", "").replace("```", "").strip()
         output_dir_problem = os.path.join(output_dir, f"problem_{problem_id}")
         os.makedirs(output_dir_problem, exist_ok=True)
         with open(os.path.join(output_dir_problem, f"tmp_ori.cu"), "w") as f:
             f.write(eval_code)
-        return
 
 
 if __name__ == "__main__":
