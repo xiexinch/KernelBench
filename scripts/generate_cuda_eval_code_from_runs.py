@@ -14,7 +14,7 @@ LEVEL_PROBLEMS = {
     3: range(1, 51),
 }
 
-MODEL_NAME = "anthropic/claude-3-7-sonnet-20250219"
+MODEL_NAME = "anthropic/claude-sonnet-4-5-20250929"
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 
