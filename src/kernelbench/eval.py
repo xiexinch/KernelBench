@@ -370,25 +370,26 @@ def build_compile_cache_with_capturing(
 def _process_input_tensor(input, device, backend="cuda", precision=torch.float32):
     """
     Helper function to move tensors to the correct device and apply backend-specific dtype casting.
-    
+    Only float tensors are cast to precision; integer/bool tensors (e.g., indices for nn.Embedding) are left as-is.
+
     Args:
         input: Input tensor or non-tensor value
         device: Target CUDA device
         backend: Backend type (e.g., 'cuda', 'triton', 'cute')
-        precision: torch.dtype 
+        precision: torch.dtype
     Returns:
         Processed tensor on correct device with correct dtype, or original value if not a tensor
     """
 
-    # sometimes things like init inputs are floats (like in the case of labels / targets, classification losses, etc.) 
     if not isinstance(input, torch.Tensor):
         return input
-    
-    # cast to the desired percision dtype for activations
-    input_tensor = input.to(dtype=precision)
-    
-    # Default for all other backends and float types
-    return input_tensor.to(device=device)
+
+    input_tensor = input.to(device=device)
+    # Only cast float tensors to precision; indices (long/int) must stay as-is for nn.Embedding
+    if input_tensor.dtype.is_floating_point:
+        input_tensor = input_tensor.to(dtype=precision)
+
+    return input_tensor
 
 
 def eval_kernel_against_ref(

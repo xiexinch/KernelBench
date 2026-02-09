@@ -58,16 +58,20 @@ def measure_ref_program_time(
             else:
                 precision_dtype = precision
 
+            def _to_device_and_precision(x, device, precision_dtype):
+                """Move tensor to device; only convert float tensors to precision_dtype.
+                Integer/bool tensors (e.g., indices for nn.Embedding) must stay as-is."""
+                if not isinstance(x, torch.Tensor):
+                    return x
+                x = x.to(device=device)
+                if x.dtype.is_floating_point:
+                    x = x.to(dtype=precision_dtype)
+                return x
 
             # set model weights and inputs to specified precision
-            inputs = [
-                x.to(device=device, dtype=precision_dtype) if isinstance(x, torch.Tensor) else x
-                for x in inputs
-            ]
-            init_inputs = [
-                x.to(device=device, dtype=precision_dtype) if isinstance(x, torch.Tensor) else x
-                for x in init_inputs
-            ]
+            # NOTE: indices (long/int) must NOT be converted - nn.Embedding requires them
+            inputs = [_to_device_and_precision(x, device, precision_dtype) for x in inputs]
+            init_inputs = [_to_device_and_precision(x, device, precision_dtype) for x in init_inputs]
 
             model = Model(*init_inputs)
             model = model.to(device=device, dtype=precision_dtype)
