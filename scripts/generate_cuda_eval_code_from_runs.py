@@ -88,6 +88,7 @@ one_shot_template = Template("""You are a CUDA expert. Your task is to generate 
 - Do not change the original macro code.
 - Do not change the original #include code.
 - Do not change the original #define code.
+- You should only output the entry code, no other text.
 
 
 You are given the following kernel code and torch::Tensor entry code:
