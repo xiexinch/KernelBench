@@ -5,13 +5,14 @@ BigBird implementation with block-sparse attention for efficient long sequence m
 
 import json
 import math
+import os
 from types import SimpleNamespace
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from huggingface_hub import hf_hub_download, list_repo_files
+from huggingface_hub import hf_hub_download
 
 
 # ============================================================================
@@ -30,18 +31,23 @@ def _dict_to_namespace(d):
 
 
 def load_config(model_name):
-    """Download and parse config.json from HuggingFace hub."""
-    config_path = hf_hub_download(repo_id=model_name, filename="config.json")
+    """从 HuggingFace 缓存加载 config.json，不联网下载。"""
+    config_path = hf_hub_download(
+        repo_id=model_name, filename="config.json", local_files_only=True
+    )
     with open(config_path, "r") as f:
         config_dict = json.load(f)
     return _dict_to_namespace(config_dict)
 
 
 def download_state_dict(model_name):
-    """Download model weights from HuggingFace hub and return state_dict."""
-    repo_files = list_repo_files(repo_id=model_name)
+    """从 HuggingFace 缓存加载模型权重，不联网下载。"""
+    config_path = hf_hub_download(
+        repo_id=model_name, filename="config.json", local_files_only=True
+    )
+    snapshot_dir = os.path.dirname(config_path)
+    repo_files = os.listdir(snapshot_dir)
 
-    # Prefer safetensors
     safetensor_files = [f for f in repo_files if f.endswith(".safetensors")]
     bin_files = [f for f in repo_files if f.endswith(".bin") and "pytorch_model" in f]
 
@@ -49,18 +55,17 @@ def download_state_dict(model_name):
         from safetensors.torch import load_file
         state_dict = {}
         for sf in sorted(safetensor_files):
-            path = hf_hub_download(repo_id=model_name, filename=sf)
+            path = os.path.join(snapshot_dir, sf)
             state_dict.update(load_file(path))
         return state_dict
     elif bin_files:
         state_dict = {}
         for bf in sorted(bin_files):
-            path = hf_hub_download(repo_id=model_name, filename=bf)
+            path = os.path.join(snapshot_dir, bf)
             state_dict.update(torch.load(path, map_location="cpu", weights_only=True))
         return state_dict
     else:
-        # Try single pytorch_model.bin
-        path = hf_hub_download(repo_id=model_name, filename="pytorch_model.bin")
+        path = os.path.join(snapshot_dir, "pytorch_model.bin")
         return torch.load(path, map_location="cpu", weights_only=True)
 
 
