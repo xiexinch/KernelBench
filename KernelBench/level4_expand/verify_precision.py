@@ -60,12 +60,22 @@ def _copy_original_weights_to_refactored(original_model, refactored_model):
     """
     original_sd = original_model.state_dict()
     refactored_sd = refactored_model.state_dict()
+    # for k1, k2 in zip(original_sd.keys(), refactored_sd.keys()):
+    #     print(k1, k2)
+    # raise '321'
     for hf_key, hf_value in original_sd.items():
         ref_key = "model." + hf_key
+        # ref_key = hf_key
         if ref_key not in refactored_sd:
+            print(
+                f"  [WARN] {ref_key} not found in refactored model, hf_key: {hf_key}, ref_key: {ref_key}"
+            )
             continue
         ref_param = refactored_sd[ref_key]
         if ref_param.shape != hf_value.shape:
+            print(
+                f"  [WARN] {ref_key} shape mismatch: {ref_param.shape} != {hf_value.shape}, hf_key: {hf_key}, ref_key: {ref_key}"
+            )
             continue
         refactored_sd[ref_key] = hf_value.to(
             device=ref_param.device, dtype=ref_param.dtype
@@ -122,6 +132,7 @@ def verify_file(file_num, model_name, batch_size, sequence_length):
         from transformers import AutoModelForCausalLM, AutoConfig
 
         hf_config = AutoConfig.from_pretrained(model_name)
+        hf_config.tie_word_embeddings = False
         original_model = AutoModelForCausalLM.from_pretrained(
             model_name, config=hf_config
         )
