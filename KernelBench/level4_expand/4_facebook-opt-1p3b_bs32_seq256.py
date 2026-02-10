@@ -95,7 +95,7 @@ class OPTAttention(nn.Module):
             attn_weights = attn_weights + attention_mask
 
         # Softmax without explicit dtype conversion
-        attn_weights = F.softmax(attn_weights, dim=-1)
+        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(value_states.dtype)
 
         # Attention output: softmax @ V
         attn_output = torch.matmul(attn_weights, value_states)

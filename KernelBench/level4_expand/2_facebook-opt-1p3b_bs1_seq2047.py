@@ -88,15 +88,15 @@ class OPTAttention(nn.Module):
         key_states = key_states.view(bsz, tgt_len, self.num_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, tgt_len, self.num_heads, self.head_dim).transpose(1, 2)
 
-        # Compute attention scores: Q @ K^T
+        # Compute attention scores: Q @ K^T（query 已在上面乘过 scaling，HF 中 attention_interface 使用 scaling=1.0）
         attn_weights = torch.matmul(query_states, key_states.transpose(-1, -2))
 
         # Apply causal mask
         if attention_mask is not None:
             attn_weights = attn_weights + attention_mask
 
-        # Softmax without explicit dtype conversion
-        attn_weights = F.softmax(attn_weights, dim=-1)
+        # 与 HF 一致：softmax 在 float32 下计算再转回，保证数值对齐
+        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(value_states.dtype)
 
         # Attention output: softmax @ V
         attn_output = torch.matmul(attn_weights, value_states)
