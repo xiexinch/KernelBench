@@ -59,7 +59,9 @@ def _build_config_from_pretrained(model_name, model_type):
     from transformers import AutoConfig
 
     hf_config = AutoConfig.from_pretrained(model_name)
-    hf_config.tie_word_embeddings = False
+    # GPT-Neo 与 ref 均使用 tie_word_embeddings，保持一致以便权重复制正确
+    if model_type != "gpt_neo":
+        hf_config.tie_word_embeddings = False
     return hf_config
 
 
@@ -114,22 +116,35 @@ def _copy_weights_between_state_dicts(
     return copied
 
 
-def _compare_state_dicts(hf_sd, ref_sd, ref_prefix="model."):
-    """Compare state_dict keys and shapes. Return (match, mismatches)."""
+def _get_ref_prefix(model_type):
+    """OPT/BART 的 ref 与 HF state_dict 键名一致（如 model.decoder.xxx），用空前缀；其余 ref 多一层 model."""
+    if model_type in ("opt", "bart"):
+        return ""
+    return "model."
+
+
+def _compare_state_dicts(hf_sd, ref_sd, ref_prefix="model.", allow_extra_in_hf=False):
+    """Compare state_dict keys and shapes. Return (match, mismatches).
+    allow_extra_in_hf: 若 True（如 BigBird/Reformer），只要求 ref 的键都在 HF 中且 shape 一致，HF 可多出键。
+    """
     hf_keys = sorted(hf_sd.keys())
     ref_keys = sorted(ref_sd.keys())
 
     mismatches = []
-    # Refactored has "model." prefix
-    ref_keys_bare = [k.replace(ref_prefix, "") if k.startswith(ref_prefix) else k for k in ref_keys]
+    ref_keys_bare = [k[len(ref_prefix):] if ref_prefix and k.startswith(ref_prefix) else k for k in ref_keys]
     hf_set = set(hf_keys)
     ref_set = set(ref_keys_bare)
 
     if hf_set != ref_set:
-        for k in hf_set - ref_set:
-            mismatches.append(("missing_in_ref", k, None))
+        if not allow_extra_in_hf:
+            for k in hf_set - ref_set:
+                mismatches.append(("missing_in_ref", k, None))
         for k in ref_set - hf_set:
             mismatches.append(("extra_in_ref", k, None))
+    # 若 allow_extra_in_hf，还要求 ref 的键都在 hf 里（否则后面权重复制会漏）
+    if allow_extra_in_hf and not ref_set.issubset(hf_set):
+        for k in ref_set - hf_set:
+            mismatches.append(("ref_key_not_in_hf", k, None))
 
     for hf_key in hf_keys:
         ref_key = ref_prefix + hf_key if any(
@@ -197,10 +212,12 @@ def verify_file(file_num, model_name, batch_size, sequence_length, model_type):
         refactored_model = RefactoredModel(hf_config)
         refactored_model.eval()
 
-        # Compare state_dict structure
+        # Compare state_dict structure（OPT/BART 与 HF 键名一致；BigBird/Reformer 允许 HF 多出 MLM/pooler 等键）
+        ref_prefix = _get_ref_prefix(model_type)
+        allow_extra_in_hf = model_type in ("bigbird", "reformer")
         hf_sd = original_model.state_dict()
         ref_sd = refactored_model.state_dict()
-        sd_match, sd_mismatches = _compare_state_dicts(hf_sd, ref_sd)
+        sd_match, sd_mismatches = _compare_state_dicts(hf_sd, ref_sd, ref_prefix, allow_extra_in_hf)
 
         if not sd_match:
             print("  [WARN] state_dict structure mismatch:")
@@ -211,12 +228,12 @@ def verify_file(file_num, model_name, batch_size, sequence_length, model_type):
         else:
             print("  [OK] state_dict keys/shapes compatible")
 
-        # Copy weights from HF to refactored for precision test (in-place, avoid extra copy)
-        # Refactored Model wraps in .model, so ref keys have "model." prefix
+        # Copy weights from HF to refactored (in-place). OPT/BART 键名与 HF 一致，其余 ref 为 model. + hf_key
         for hf_key, hf_val in hf_sd.items():
-            ref_key = "model." + hf_key
-            if ref_key in ref_sd and ref_sd[ref_key].shape == hf_val.shape:
-                ref_sd[ref_key].copy_(hf_val)
+            for ref_key in (hf_key, "model." + hf_key):
+                if ref_key in ref_sd and ref_sd[ref_key].shape == hf_val.shape:
+                    ref_sd[ref_key].copy_(hf_val)
+                    break
         refactored_model.load_state_dict(ref_sd, strict=False)
 
         # 释放 state_dict 以降低内存峰值（大模型下可节省数 GB）

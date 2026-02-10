@@ -175,13 +175,19 @@ class ElectraModel(nn.Module):
         if self.embeddings_project is not None:
             embedding_output = self.embeddings_project(embedding_output)
 
-        # Create extended attention mask for encoder with proper dtype handling
+        # ElectraForCausalLM 需与 HF 一致：is_decoder=True 时使用因果 mask
+        # 与 HF _create_attention_masks -> create_causal_mask 对齐
+        bsz, seq_len = embedding_output.shape[:2]
         if attention_mask is not None:
             extended_attention_mask = attention_mask[:, None, None, :]
-            # Use torch.finfo().min for causal masking to ensure precision alignment
             extended_attention_mask = (1.0 - extended_attention_mask) * torch.finfo(embedding_output.dtype).min
         else:
-            extended_attention_mask = None
+            # 无 padding 时构建因果 mask：下三角为 0，上三角为 -inf
+            causal_mask = torch.triu(
+                torch.ones(seq_len, seq_len, dtype=torch.bool, device=embedding_output.device), diagonal=1
+            )
+            extended_attention_mask = causal_mask.unsqueeze(0).unsqueeze(0).to(embedding_output.dtype)
+            extended_attention_mask = extended_attention_mask * torch.finfo(embedding_output.dtype).min
 
         encoder_output = self.encoder(embedding_output, attention_mask=extended_attention_mask)
         return encoder_output
