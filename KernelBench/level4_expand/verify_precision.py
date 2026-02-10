@@ -134,7 +134,7 @@ def verify_file(file_num, model_name, batch_size, sequence_length):
         # Get init inputs and create refactored model
         # init_inputs = refactored_module.get_init_inputs()
         RefactoredModel = refactored_module.Model
-        refactored_model = RefactoredModel(*hf_config)
+        refactored_model = RefactoredModel(*[hf_config])
         refactored_model.eval()
 
         # 将 original 的权重复制到 refactored，确保对比时两边使用同一权重
