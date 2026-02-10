@@ -38,6 +38,7 @@ class BigBirdConfig:
         self.block_size = 64
         self.num_random_blocks = 3
         self.rescale_embeddings = False
+        self.use_bias = True  # Aligned with official BigBirdConfig
 
 
 # ============================================================================
@@ -78,9 +79,11 @@ class BigBirdEmbeddings(nn.Module):
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
         position_embeddings = self.position_embeddings(position_ids)
 
+        # Aligned with official HF BigBirdEmbeddings: add -> dropout -> LayerNorm
+        # See transformers/models/big_bird/modeling_big_bird.py
         embeddings = inputs_embeds + token_type_embeddings + position_embeddings
-        embeddings = self.LayerNorm(embeddings)
         embeddings = self.dropout(embeddings)
+        embeddings = self.LayerNorm(embeddings)
         return embeddings
 
 
@@ -93,9 +96,10 @@ class BigBirdSelfAttention(nn.Module):
         self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
         self.all_head_size = self.num_attention_heads * self.attention_head_size
 
-        self.query = nn.Linear(config.hidden_size, self.all_head_size)
-        self.key = nn.Linear(config.hidden_size, self.all_head_size)
-        self.value = nn.Linear(config.hidden_size, self.all_head_size)
+        use_bias = getattr(config, "use_bias", True)
+        self.query = nn.Linear(config.hidden_size, self.all_head_size, bias=use_bias)
+        self.key = nn.Linear(config.hidden_size, self.all_head_size, bias=use_bias)
+        self.value = nn.Linear(config.hidden_size, self.all_head_size, bias=use_bias)
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
 
     def forward(self, hidden_states, attention_mask=None):
@@ -142,9 +146,10 @@ class BigBirdBlockSparseAttention(nn.Module):
         self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
         self.all_head_size = self.num_attention_heads * self.attention_head_size
 
-        self.query = nn.Linear(config.hidden_size, self.all_head_size)
-        self.key = nn.Linear(config.hidden_size, self.all_head_size)
-        self.value = nn.Linear(config.hidden_size, self.all_head_size)
+        use_bias = getattr(config, "use_bias", True)
+        self.query = nn.Linear(config.hidden_size, self.all_head_size, bias=use_bias)
+        self.key = nn.Linear(config.hidden_size, self.all_head_size, bias=use_bias)
+        self.value = nn.Linear(config.hidden_size, self.all_head_size, bias=use_bias)
         self.seed = seed
 
     def torch_bmm_nd(self, inp_1, inp_2, ndim=4):

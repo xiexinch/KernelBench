@@ -1,19 +1,29 @@
 """
 GPT-2 pure PyTorch expanded implementation (no transformers dependency).
 Batch size=1024, sequence_length=32.
-Interface consistent with level4/19_gpt2_bs1024_seq32.py, structure aligned with HuggingFace GPT2LMHeadModel.
-
-Fixed precision alignment issues:
-- Use hardcoded GPT2ConfigExpanded class instead of runtime config loading
-- Use torch.finfo().min for causal mask instead of float("-inf")
-- Simplify softmax without explicit dtype conversion
-- Update Model interface to accept only config parameter
+Aligned with official Transformers GPT2LMHeadModel: uses Conv1D for c_attn, c_proj, c_fc.
 """
 
 import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+class Conv1D(nn.Module):
+    """Aligned with HF pytorch_utils.Conv1D for state_dict compatibility."""
+    def __init__(self, nf, nx):
+        super().__init__()
+        self.nf = nf
+        self.nx = nx
+        self.weight = nn.Parameter(torch.empty(nx, nf))
+        self.bias = nn.Parameter(torch.zeros(nf))
+        nn.init.normal_(self.weight, std=0.02)
+
+    def forward(self, x):
+        size_out = x.size()[:-1] + (self.nf,)
+        x = torch.addmm(self.bias, x.view(-1, x.size(-1)), self.weight)
+        return x.view(size_out)
 
 
 class GPT2ConfigExpanded:
@@ -60,8 +70,8 @@ class _GPT2Attention(nn.Module):
         self.scale_attn_weights = config.scale_attn_weights
         self.scale_attn_by_inverse_layer_idx = config.scale_attn_by_inverse_layer_idx
         self.layer_idx = layer_idx
-        self.c_attn = nn.Linear(self.embed_dim, 3 * self.embed_dim)
-        self.c_proj = nn.Linear(self.embed_dim, self.embed_dim)
+        self.c_attn = Conv1D(3 * self.embed_dim, self.embed_dim)
+        self.c_proj = Conv1D(self.embed_dim, self.embed_dim)
         self.attn_dropout = nn.Dropout(config.attn_pdrop)
         self.resid_dropout = nn.Dropout(config.resid_pdrop)
 
@@ -95,8 +105,8 @@ class _GPT2MLP(nn.Module):
     def __init__(self, intermediate_size, config):
         super().__init__()
         embed_dim = config.hidden_size
-        self.c_fc = nn.Linear(embed_dim, intermediate_size)
-        self.c_proj = nn.Linear(intermediate_size, embed_dim)
+        self.c_fc = Conv1D(intermediate_size, embed_dim)
+        self.c_proj = Conv1D(embed_dim, intermediate_size)
         self.dropout = nn.Dropout(config.resid_pdrop)
 
     def forward(self, hidden_states):

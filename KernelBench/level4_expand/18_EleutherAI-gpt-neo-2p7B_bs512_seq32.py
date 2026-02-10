@@ -93,8 +93,9 @@ class GPTNeoSelfAttention(nn.Module):
 
         attn_weights = torch.matmul(query, key.transpose(-1, -2))
 
-        # Apply causal/local mask
-        causal_mask = self.bias[:, :, :seq_len, :seq_len]
+        # Aligned with official HF: causal_mask slice for cache compatibility
+        query_length, key_length = seq_len, seq_len
+        causal_mask = self.bias[:, :, key_length - query_length : key_length, :key_length]
         # Fixed dtype mismatch: use torch.finfo().min for causal mask instead of float("-inf")
         mask_value = torch.full([], torch.finfo(attn_weights.dtype).min, dtype=attn_weights.dtype, device=attn_weights.device)
         attn_weights = torch.where(causal_mask, attn_weights, mask_value)

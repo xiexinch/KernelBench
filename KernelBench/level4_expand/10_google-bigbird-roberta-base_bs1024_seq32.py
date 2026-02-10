@@ -38,6 +38,7 @@ class BigBirdConfig:
         self.block_size = 64
         self.num_random_blocks = 3
         self.rescale_embeddings = False
+        self.use_bias = True  # Aligned with official BigBirdConfig
 
 
 # ============================================================================
@@ -78,9 +79,10 @@ class BigBirdEmbeddings(nn.Module):
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
         position_embeddings = self.position_embeddings(position_ids)
 
+        # Aligned with official HF BigBirdEmbeddings: add -> dropout -> LayerNorm
         embeddings = inputs_embeds + token_type_embeddings + position_embeddings
-        embeddings = self.LayerNorm(embeddings)
         embeddings = self.dropout(embeddings)
+        embeddings = self.LayerNorm(embeddings)
         return embeddings
 
 
@@ -93,9 +95,10 @@ class BigBirdSelfAttention(nn.Module):
         self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
         self.all_head_size = self.num_attention_heads * self.attention_head_size
 
-        self.query = nn.Linear(config.hidden_size, self.all_head_size)
-        self.key = nn.Linear(config.hidden_size, self.all_head_size)
-        self.value = nn.Linear(config.hidden_size, self.all_head_size)
+        use_bias = getattr(config, "use_bias", True)
+        self.query = nn.Linear(config.hidden_size, self.all_head_size, bias=use_bias)
+        self.key = nn.Linear(config.hidden_size, self.all_head_size, bias=use_bias)
+        self.value = nn.Linear(config.hidden_size, self.all_head_size, bias=use_bias)
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
 
     def forward(self, hidden_states, attention_mask=None):
@@ -142,9 +145,10 @@ class BigBirdBlockSparseAttention(nn.Module):
         self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
         self.all_head_size = self.num_attention_heads * self.attention_head_size
 
-        self.query = nn.Linear(config.hidden_size, self.all_head_size)
-        self.key = nn.Linear(config.hidden_size, self.all_head_size)
-        self.value = nn.Linear(config.hidden_size, self.all_head_size)
+        use_bias = getattr(config, "use_bias", True)
+        self.query = nn.Linear(config.hidden_size, self.all_head_size, bias=use_bias)
+        self.key = nn.Linear(config.hidden_size, self.all_head_size, bias=use_bias)
+        self.value = nn.Linear(config.hidden_size, self.all_head_size, bias=use_bias)
         self.seed = seed
 
     def torch_bmm_nd(self, inp_1, inp_2, ndim=4):
@@ -407,34 +411,33 @@ class BigBirdSelfOutput(nn.Module):
 
 
 class BigBirdAttention(nn.Module):
+    """Aligned with official HF: uses original_full when band_mask is None (short seq)."""
     def __init__(self, config, seed=None):
         super().__init__()
         self.attention_type = config.attention_type
         self.config = config
         self.seed = seed
-
-        if self.attention_type == "original_full":
-            self.self = BigBirdSelfAttention(config)
-        elif self.attention_type == "block_sparse":
-            self.self = BigBirdBlockSparseAttention(config, seed)
+        self.self_full = BigBirdSelfAttention(config)
+        if self.attention_type == "block_sparse":
+            self.self_block = BigBirdBlockSparseAttention(config, seed)
         else:
-            raise ValueError(f"Unknown attention_type: {self.attention_type}")
-
+            self.self_block = None
         self.output = BigBirdSelfOutput(config)
 
     def forward(self, hidden_states, attention_mask=None, band_mask=None, from_mask=None,
                 to_mask=None, from_blocked_mask=None, to_blocked_mask=None):
-        if self.attention_type == "original_full":
-            self_outputs = self.self(hidden_states, attention_mask=attention_mask)
+        use_full = (self.attention_type == "original_full" or
+                    (band_mask is None and from_mask is None))
+        if use_full:
+            self_outputs = self.self_full(hidden_states, attention_mask=attention_mask)
         else:
-            # Cast masks to hidden_states dtype
             if band_mask is not None:
                 band_mask = band_mask.to(hidden_states.dtype)
             if from_mask is not None:
                 from_mask = from_mask.to(hidden_states.dtype)
             if to_mask is not None:
                 to_mask = to_mask.to(hidden_states.dtype)
-            self_outputs = self.self(
+            self_outputs = self.self_block(
                 hidden_states, band_mask, from_mask, to_mask, from_blocked_mask, to_blocked_mask
             )
 
@@ -565,7 +568,13 @@ class BigBirdModel(nn.Module):
         if token_type_ids is None:
             token_type_ids = torch.zeros(bsz, orig_seq_len, dtype=torch.long, device=input_ids.device)
 
-        if self.attention_type == "block_sparse":
+        # Aligned with official HF: use original_full when seq too short for block_sparse
+        # num global tokens = 2*block_size + 3*block_size + num_random_blocks*block_size*2 = 704 for block_size=64
+        min_seq_for_block_sparse = 5 * self.block_size  # Need >=5 blocks for band_mask indexing
+        use_block_sparse = (self.attention_type == "block_sparse" and
+                            orig_seq_len >= min_seq_for_block_sparse)
+
+        if use_block_sparse:
             padding_len, input_ids, attention_mask, token_type_ids = self._pad_to_block_size(
                 input_ids, attention_mask, token_type_ids
             )
@@ -577,7 +586,6 @@ class BigBirdModel(nn.Module):
             padding_len = 0
             blocked_encoder_mask = band_mask = from_mask = to_mask = None
             extended_attention_mask = attention_mask[:, None, None, :].float()
-            # Use torch.finfo().min instead of float('-inf') for precision alignment
             extended_attention_mask = (1.0 - extended_attention_mask) * torch.finfo(extended_attention_mask.dtype).min
 
         hidden_states = self.embeddings(input_ids, token_type_ids=token_type_ids)

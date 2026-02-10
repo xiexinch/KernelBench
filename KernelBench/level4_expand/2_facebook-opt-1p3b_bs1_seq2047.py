@@ -50,8 +50,10 @@ class OPTLearnedPositionalEmbedding(nn.Embedding):
 
     def forward(self, attention_mask, past_key_values_length=0, position_ids=None):
         if position_ids is None:
-            # Compute position IDs from attention mask: cumsum(mask) - 1, then add offset
-            position_ids = torch.cumsum(attention_mask, dim=1).long() - 1
+            # Aligned with official HF OPT: position_ids = (cumsum * mask) - 1
+            # See transformers/models/opt/modeling_opt.py OPTLearnedPositionalEmbedding.forward
+            position_ids = torch.cumsum(attention_mask, dim=1)
+            position_ids = (position_ids * attention_mask - 1).long()
             position_ids = position_ids[:, past_key_values_length:]
         return super().forward(position_ids + self.offset)
 
