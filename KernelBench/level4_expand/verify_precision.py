@@ -70,7 +70,7 @@ def _copy_original_weights_to_refactored(original_model, refactored_model):
         refactored_sd[ref_key] = hf_value.to(
             device=ref_param.device, dtype=ref_param.dtype
         ).clone()
-    refactored_model.load_state_dict(refactored_sd, strict=False)
+    refactored_model.load_state_dict(refactored_sd, strict=True)
 
 
 def verify_file(file_num, model_name, batch_size, sequence_length):
@@ -130,12 +130,19 @@ def verify_file(file_num, model_name, batch_size, sequence_length):
         # 将 original 的权重复制到 refactored，确保对比时两边使用同一权重
         _copy_original_weights_to_refactored(original_model, refactored_model)
 
+        # 将两个模型移到指定设备上进行测试
+        device = torch.device(DEVICE)
+        original_model = original_model.to(device)
+        refactored_model = refactored_model.to(device)
+
         vocab_size = refactored_module.vocab_size
 
         max_errors = []
         for trial in range(NUM_TRIALS):
             torch.manual_seed(42 + trial)
-            inputs = torch.randint(0, vocab_size, (batch_size, sequence_length))
+            inputs = torch.randint(
+                0, vocab_size, (batch_size, sequence_length), device=device
+            )
 
             with torch.no_grad():
                 original_logits = original_model(inputs).logits
