@@ -178,17 +178,19 @@ class LSHSelfAttention(nn.Module):
 
         attn_weights = torch.matmul(query_vectors, key_vectors.transpose(-1, -2))
 
-        # Self-mask (prevent attending to self)
+        # FIX: dtype-aware self-mask handling for precision alignment
         query_bucket_idx = sorted_buckets.unsqueeze(-1)
         key_bucket_idx = sorted_buckets_adj.unsqueeze(-2)
         self_mask = query_bucket_idx != key_bucket_idx
         if hidden_states.dtype == torch.float16:
-            self_mask_value = self.self_mask_value_float16.to(hidden_states.device)
+            self_mask_value = self.self_mask_value_float16.to(hidden_states.device).to(dtype=hidden_states.dtype)
         else:
-            self_mask_value = self.self_mask_value_float32.to(hidden_states.device)
+            self_mask_value = self.self_mask_value_float32.to(hidden_states.device).to(dtype=hidden_states.dtype)
         attn_weights = attn_weights.masked_fill(self_mask, self_mask_value)
 
-        attn_weights = F.softmax(attn_weights, dim=-1)
+        # FIX: dtype-aware softmax with stable logsumexp for precision alignment
+        logits = torch.logsumexp(attn_weights, dim=-1, keepdim=True)
+        attn_weights = torch.exp(attn_weights - logits)
         attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
 
         attn_output = torch.matmul(attn_weights, sorted_v_adj)
@@ -215,17 +217,19 @@ class LSHSelfAttention(nn.Module):
         attn_weights = torch.matmul(query_key_vectors, query_key_vectors.transpose(-1, -2))
         attn_weights = attn_weights / math.sqrt(self.attention_head_size)
 
-        # Causal mask
+        # FIX: dtype-aware causal mask for precision alignment
         causal_mask = torch.triu(
             torch.ones(seq_len, seq_len, dtype=torch.bool, device=query_key_vectors.device), diagonal=1
         )
         if query_key_vectors.dtype == torch.float16:
-            mask_val = -1e4
+            mask_val = torch.tensor(-1e4, device=query_key_vectors.device, dtype=query_key_vectors.dtype)
         else:
-            mask_val = -1e9
+            mask_val = torch.tensor(-1e9, device=query_key_vectors.device, dtype=query_key_vectors.dtype)
         attn_weights = attn_weights.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0), mask_val)
 
-        attn_weights = F.softmax(attn_weights, dim=-1)
+        # FIX: dtype-aware softmax with stable logsumexp for precision alignment
+        logits = torch.logsumexp(attn_weights, dim=-1, keepdim=True)
+        attn_weights = torch.exp(attn_weights - logits)
         attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
 
         attn_output = torch.matmul(attn_weights, value_vectors)
@@ -364,7 +368,7 @@ class LocalSelfAttention(nn.Module):
 
         attn_weights = torch.matmul(query_vectors, key_vectors.transpose(-1, -2))
 
-        # Apply causal mask for local attention
+        # FIX: dtype-aware causal mask handling for precision alignment
         if not do_standard:
             # Create chunk-local causal mask
             q_len = self.chunk_length
@@ -377,18 +381,18 @@ class LocalSelfAttention(nn.Module):
             k_indices = torch.cat(k_indices_parts)
             causal_mask = q_indices.unsqueeze(1) < k_indices.unsqueeze(0)
             if hidden_states.dtype == torch.float16:
-                mask_val = self.mask_value_float16.to(hidden_states.device)
+                mask_val = self.mask_value_float16.to(hidden_states.device).to(dtype=hidden_states.dtype)
             else:
-                mask_val = self.mask_value_float32.to(hidden_states.device)
+                mask_val = self.mask_value_float32.to(hidden_states.device).to(dtype=hidden_states.dtype)
             attn_weights = attn_weights.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0).unsqueeze(0), mask_val)
         else:
             causal_mask = torch.triu(
                 torch.ones(seq_len, seq_len, dtype=torch.bool, device=hidden_states.device), diagonal=1
             )
             if hidden_states.dtype == torch.float16:
-                mask_val = self.mask_value_float16.to(hidden_states.device)
+                mask_val = self.mask_value_float16.to(hidden_states.device).to(dtype=hidden_states.dtype)
             else:
-                mask_val = self.mask_value_float32.to(hidden_states.device)
+                mask_val = self.mask_value_float32.to(hidden_states.device).to(dtype=hidden_states.dtype)
             attn_weights = attn_weights.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0), mask_val)
 
         # Use logsumexp-based softmax for numerical stability
@@ -603,44 +607,41 @@ class ReformerModelWithLMHead(nn.Module):
         return logits
 
 
-# Configuration for google/reformer-enwik8
-def get_reformer_enwik8_config():
-    config = SimpleNamespace(
-        vocab_size=258,
-        hidden_size=256,
-        num_attention_heads=2,
-        attention_head_size=128,
-        num_hidden_layers=6,
-        feed_forward_size=512,
-        hidden_dropout_prob=0.05,
-        layer_norm_eps=1e-12,
-        # Axial position embeddings: factorized [64, 64] with dims [64, 192]
-        axial_pos_shape=[64, 64],
-        axial_pos_embds_dim=[64, 192],
-        # LSH attention
-        lsh_attn_chunk_length=64,
-        num_hashes=1,
-        num_buckets=64,
-        lsh_num_chunks_before=1,
-        lsh_num_chunks_after=0,
-        lsh_attention_probs_dropout_prob=0.0,
-        # Local attention
-        local_attn_chunk_length=64,
-        local_num_chunks_before=1,
-        local_num_chunks_after=0,
-        local_attention_probs_dropout_prob=0.05,
-        # Attention layers pattern: alternating LSH and local
-        attn_layers=["lsh", "local", "lsh", "local", "lsh", "local"],
-        is_decoder=True,
-    )
-    return config
+# FIX: Static hardcoded ReformerConfig class replacing runtime config loading
+class ReformerConfig:
+    """Hardcoded config for google/reformer-enwik8 (bs1024, seq32)"""
+    vocab_size = 258
+    hidden_size = 256
+    num_attention_heads = 2
+    attention_head_size = 128
+    num_hidden_layers = 6
+    feed_forward_size = 512
+    hidden_dropout_prob = 0.05
+    layer_norm_eps = 1e-12
+    # Axial position embeddings: factorized [64, 64] with dims [64, 192]
+    axial_pos_shape = [64, 64]
+    axial_pos_embds_dim = [64, 192]
+    # LSH attention
+    lsh_attn_chunk_length = 64
+    num_hashes = 1
+    num_buckets = 64
+    lsh_num_chunks_before = 1
+    lsh_num_chunks_after = 0
+    lsh_attention_probs_dropout_prob = 0.0
+    # Local attention
+    local_attn_chunk_length = 64
+    local_num_chunks_before = 1
+    local_num_chunks_after = 0
+    local_attention_probs_dropout_prob = 0.05
+    # Attention layers pattern: alternating LSH and local
+    attn_layers = ["lsh", "local", "lsh", "local", "lsh", "local"]
+    is_decoder = True
 
 
-# Benchmark setup
+# FIX: Updated Model interface - __init__(self, config), get_init_inputs() returns [config]
 class Model(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, config):
         super().__init__()
-        config = get_reformer_enwik8_config()
         self.model = ReformerModelWithLMHead(config)
 
     def forward(self, x):
@@ -648,7 +649,7 @@ class Model(torch.nn.Module):
 
 
 model_name = "google/reformer-enwik8"
-config = get_reformer_enwik8_config()
+config = ReformerConfig()
 vocab_size = config.vocab_size
 sequence_length = 32
 batch_size = 1024
@@ -660,4 +661,5 @@ def get_inputs():
 
 
 def get_init_inputs():
-    return []
+    # FIX: Return config for static initialization
+    return [ReformerConfig()]

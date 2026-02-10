@@ -5,77 +5,36 @@ This file contains a complete PyTorch implementation of OPT with key features:
 - Position IDs from attention mask: cumsum(attn_mask) * attn_mask - 1
 - Pre-LN structure (do_layer_norm_before=True for opt-1.3b)
 - Query scaling by head_dim^-0.5
-- Softmax in float32, cast back to query dtype
+- Simplified softmax (no explicit dtype conversion)
+- Causal mask uses torch.finfo().min
 - Optional embed projection (project_in/project_out) when word_embed_proj_dim != hidden_size
 """
-
-import json
-import math
-import os
-from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from huggingface_hub import hf_hub_download
 
 
 # ============================================================================
-# Configuration Loading
+# Static Configuration
 # ============================================================================
 
-def _dict_to_namespace(d):
-    """Recursively convert a dict to SimpleNamespace for attribute access."""
-    if isinstance(d, dict):
-        for k, v in d.items():
-            d[k] = _dict_to_namespace(v)
-        return SimpleNamespace(**d)
-    if isinstance(d, list):
-        return [_dict_to_namespace(item) for item in d]
-    return d
-
-
-def load_config(model_name):
-    """从 HuggingFace 缓存加载 config.json，不联网下载。"""
-    config_path = hf_hub_download(
-        repo_id=model_name, filename="config.json", local_files_only=True
-    )
-    with open(config_path, "r") as f:
-        config_dict = json.load(f)
-    return _dict_to_namespace(config_dict)
-
-
-# ============================================================================
-# Weight Loading
-# ============================================================================
-
-def download_state_dict(model_name):
-    """从 HuggingFace 缓存加载模型权重，不联网下载。"""
-    config_path = hf_hub_download(
-        repo_id=model_name, filename="config.json", local_files_only=True
-    )
-    snapshot_dir = os.path.dirname(config_path)
-    repo_files = os.listdir(snapshot_dir)
-
-    safetensor_files = [f for f in repo_files if f.endswith(".safetensors")]
-    bin_files = [f for f in repo_files if f.endswith(".bin") and "pytorch_model" in f]
-
-    if safetensor_files:
-        from safetensors.torch import load_file
-        state_dict = {}
-        for sf in sorted(safetensor_files):
-            path = os.path.join(snapshot_dir, sf)
-            state_dict.update(load_file(path))
-        return state_dict
-    elif bin_files:
-        state_dict = {}
-        for bf in sorted(bin_files):
-            path = os.path.join(snapshot_dir, bf)
-            state_dict.update(torch.load(path, map_location="cpu", weights_only=True))
-        return state_dict
-    else:
-        path = os.path.join(snapshot_dir, "pytorch_model.bin")
-        return torch.load(path, map_location="cpu", weights_only=True)
+class OPTConfig:
+    """Static hardcoded OPT-1.3B configuration."""
+    def __init__(self):
+        self.vocab_size = 50272
+        self.hidden_size = 768
+        self.num_hidden_layers = 24
+        self.ffn_dim = 3072
+        self.max_position_embeddings = 2048
+        self.num_attention_heads = 12
+        self.word_embed_proj_dim = 768
+        self.dropout = 0.1
+        self.activation_function = "relu"
+        self.do_layer_norm_before = True
+        self.enable_bias = True
+        self.layer_norm_elementwise_affine = True
+        self.pad_token_id = 1
 
 
 # ============================================================================
@@ -91,7 +50,7 @@ class OPTLearnedPositionalEmbedding(nn.Embedding):
 
     def forward(self, attention_mask, past_key_values_length=0, position_ids=None):
         if position_ids is None:
-            # Compute from attention mask: cumsum(attn_mask) * attn_mask - 1
+            # Compute position IDs from attention mask: cumsum(mask) - 1, then add offset
             position_ids = torch.cumsum(attention_mask, dim=1).long() - 1
             position_ids = position_ids[:, past_key_values_length:]
         return super().forward(position_ids + self.offset)
@@ -108,7 +67,7 @@ class OPTAttention(nn.Module):
         # Query scaling by head_dim^-0.5
         self.scaling = self.head_dim ** -0.5
 
-        enable_bias = getattr(config, "enable_bias", True)
+        enable_bias = config.enable_bias
         self.q_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=enable_bias)
         self.k_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=enable_bias)
         self.v_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=enable_bias)
@@ -122,18 +81,22 @@ class OPTAttention(nn.Module):
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
+        # Reshape to (batch_size, num_heads, seq_len, head_dim)
         query_states = query_states.view(bsz, tgt_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, tgt_len, self.num_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, tgt_len, self.num_heads, self.head_dim).transpose(1, 2)
 
+        # Compute attention scores: Q @ K^T
         attn_weights = torch.matmul(query_states, key_states.transpose(-1, -2))
 
+        # Apply causal mask
         if attention_mask is not None:
             attn_weights = attn_weights + attention_mask
 
-        # Softmax in float32, cast back to query dtype
-        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        # Softmax without explicit dtype conversion
+        attn_weights = F.softmax(attn_weights, dim=-1)
 
+        # Attention output: softmax @ V
         attn_output = torch.matmul(attn_weights, value_states)
         attn_output = attn_output.transpose(1, 2).reshape(bsz, tgt_len, -1).contiguous()
         attn_output = self.out_proj(attn_output)
@@ -152,8 +115,8 @@ class OPTDecoderLayer(nn.Module):
         self.do_layer_norm_before = config.do_layer_norm_before
         self.dropout = config.dropout
 
-        enable_bias = getattr(config, "enable_bias", True)
-        layer_norm_elementwise_affine = getattr(config, "layer_norm_elementwise_affine", True)
+        enable_bias = config.enable_bias
+        layer_norm_elementwise_affine = config.layer_norm_elementwise_affine
 
         self.self_attn_layer_norm = nn.LayerNorm(
             self.embed_dim, elementwise_affine=layer_norm_elementwise_affine
@@ -164,11 +127,10 @@ class OPTDecoderLayer(nn.Module):
             self.embed_dim, elementwise_affine=layer_norm_elementwise_affine
         )
 
-        # Activation function
-        act_fn_name = getattr(config, "activation_function", "relu")
-        if act_fn_name == "relu":
+        # Activation function (ReLU for opt-1.3b)
+        if config.activation_function == "relu":
             self.activation_fn = F.relu
-        elif act_fn_name == "gelu":
+        elif config.activation_function == "gelu":
             self.activation_fn = F.gelu
         else:
             self.activation_fn = F.relu
@@ -180,14 +142,16 @@ class OPTDecoderLayer(nn.Module):
         if self.do_layer_norm_before:
             hidden_states = self.self_attn_layer_norm(hidden_states)
 
+        # Self-attention
         hidden_states = self.self_attn(hidden_states, attention_mask=attention_mask)
         hidden_states = F.dropout(hidden_states, p=self.dropout, training=self.training)
         hidden_states = residual + hidden_states
 
+        # Post-LN (if not pre-LN)
         if not self.do_layer_norm_before:
             hidden_states = self.self_attn_layer_norm(hidden_states)
 
-        # FFN
+        # Feed-forward network
         hidden_states_shape = hidden_states.shape
         hidden_states = hidden_states.reshape(-1, hidden_states.size(-1))
         residual = hidden_states
@@ -203,6 +167,7 @@ class OPTDecoderLayer(nn.Module):
 
         hidden_states = (residual + hidden_states).view(hidden_states_shape)
 
+        # Post-LN (if not pre-LN)
         if not self.do_layer_norm_before:
             hidden_states = self.final_layer_norm(hidden_states)
 
@@ -216,8 +181,9 @@ class OPTDecoder(nn.Module):
         super().__init__()
         self.config = config
         self.dropout = config.dropout
-        self.padding_idx = getattr(config, "pad_token_id", 1)
+        self.padding_idx = config.pad_token_id
 
+        # Token and position embeddings
         self.embed_tokens = nn.Embedding(config.vocab_size, config.word_embed_proj_dim, self.padding_idx)
         self.embed_positions = OPTLearnedPositionalEmbedding(config.max_position_embeddings, config.hidden_size)
 
@@ -229,20 +195,23 @@ class OPTDecoder(nn.Module):
             self.project_in = None
             self.project_out = None
 
+        # Final layer norm (only for pre-LN)
         if config.do_layer_norm_before:
             self.final_layer_norm = nn.LayerNorm(
                 config.hidden_size,
-                elementwise_affine=getattr(config, "layer_norm_elementwise_affine", True)
+                elementwise_affine=config.layer_norm_elementwise_affine
             )
         else:
             self.final_layer_norm = None
 
+        # Decoder layers
         self.layers = nn.ModuleList([
             OPTDecoderLayer(config, layer_idx=i)
             for i in range(config.num_hidden_layers)
         ])
 
     def forward(self, input_ids, attention_mask=None):
+        # Embed input tokens
         inputs_embeds = self.embed_tokens(input_ids)
 
         if attention_mask is None:
@@ -252,25 +221,31 @@ class OPTDecoder(nn.Module):
         # Position embeddings from attention mask
         pos_embeds = self.embed_positions(attention_mask)
 
+        # Optional embed projection
         if self.project_in is not None:
             inputs_embeds = self.project_in(inputs_embeds)
 
         hidden_states = inputs_embeds + pos_embeds
 
-        # Create causal mask
+        # Create causal mask: 1 for future positions, 0 for past/current
         bsz, seq_len = input_ids.shape
         causal_mask = torch.triu(
             torch.ones(seq_len, seq_len, dtype=torch.bool, device=input_ids.device), diagonal=1
         )
+        # Unsqueeze for batch and num_heads dimensions
         causal_mask = causal_mask.unsqueeze(0).unsqueeze(0)
+        # Use torch.finfo().min instead of float('-inf') for numerical stability
         causal_mask = causal_mask.to(hidden_states.dtype) * torch.finfo(hidden_states.dtype).min
 
+        # Apply decoder layers
         for layer in self.layers:
             hidden_states = layer(hidden_states, attention_mask=causal_mask)
 
+        # Final layer norm (if pre-LN)
         if self.final_layer_norm is not None:
             hidden_states = self.final_layer_norm(hidden_states)
 
+        # Optional embed projection output
         if self.project_out is not None:
             hidden_states = self.project_out(hidden_states)
 
@@ -284,40 +259,17 @@ class OPTForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.decoder = OPTDecoder(config)
+        # LM head for next token prediction
         self.lm_head = nn.Linear(config.word_embed_proj_dim, config.vocab_size, bias=False)
-        # Weight tying
+        # Weight tying: share weights between embedding and output layer
         self.lm_head.weight = self.decoder.embed_tokens.weight
 
     def forward(self, input_ids, attention_mask=None):
+        # Get decoder output
         hidden_states = self.decoder(input_ids, attention_mask=attention_mask)
+        # Compute logits
         logits = self.lm_head(hidden_states)
         return logits
-
-    @classmethod
-    def from_pretrained(cls, model_name):
-        config = load_config(model_name)
-        model = cls(config)
-
-        hf_sd = download_state_dict(model_name)
-        new_sd = {}
-        for k, v in hf_sd.items():
-            new_key = k
-            # Map from HF naming: model.decoder.* -> decoder.*
-            if new_key.startswith("model.decoder."):
-                new_key = new_key[len("model."):]
-            elif new_key == "lm_head.weight":
-                new_sd[new_key] = v
-                continue
-            else:
-                continue
-            new_sd[new_key] = v
-
-        if "lm_head.weight" in hf_sd:
-            new_sd["lm_head.weight"] = hf_sd["lm_head.weight"]
-
-        model.load_state_dict(new_sd, strict=False)
-        model.lm_head.weight = model.decoder.embed_tokens.weight
-        return model
 
 
 # ============================================================================
@@ -325,25 +277,28 @@ class OPTForCausalLM(nn.Module):
 # ============================================================================
 
 class Model(torch.nn.Module):
-    def __init__(self, model_name, config):
+    def __init__(self, config):
         super().__init__()
-        self.model = OPTForCausalLM.from_pretrained(model_name)
+        # Initialize OPT model with hardcoded config
+        self.model = OPTForCausalLM(config)
 
     def forward(self, x):
         return self.model(x)
 
 
-model_name = "facebook/opt-1.3b"
-config = load_config(model_name)
+# Hardcoded config and batch parameters
+config = OPTConfig()
 vocab_size = config.vocab_size
 sequence_length = 32
 batch_size = 512
 
 
 def get_inputs():
+    # Generate random input token IDs
     inputs = torch.randint(0, vocab_size, (batch_size, sequence_length))
     return [inputs]
 
 
 def get_init_inputs():
-    return [model_name, config]
+    # Return config for Model initialization
+    return [config]

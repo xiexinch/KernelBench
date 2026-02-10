@@ -9,14 +9,17 @@ import torch.nn.functional as F
 class ElectraEmbeddings(nn.Module):
     def __init__(self, config):
         super().__init__()
+        # Initialize word, position, and token type embeddings
         self.word_embeddings = nn.Embedding(config.vocab_size, config.embedding_size,
                                             padding_idx=config.pad_token_id)
         self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.embedding_size)
         self.token_type_embeddings = nn.Embedding(config.type_vocab_size, config.embedding_size)
 
+        # Layer normalization and dropout
         self.LayerNorm = nn.LayerNorm(config.embedding_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
+        # Register position_ids as a buffer (not trainable parameter)
         self.register_buffer(
             "position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)), persistent=False
         )
@@ -53,19 +56,24 @@ class ElectraSelfAttention(nn.Module):
     def forward(self, hidden_states, attention_mask=None):
         bsz, seq_len, _ = hidden_states.size()
 
+        # Project and reshape query, key, value for multi-head attention
         query_layer = self.query(hidden_states).view(bsz, seq_len, self.num_attention_heads, self.attention_head_size).transpose(1, 2)
         key_layer = self.key(hidden_states).view(bsz, seq_len, self.num_attention_heads, self.attention_head_size).transpose(1, 2)
         value_layer = self.value(hidden_states).view(bsz, seq_len, self.num_attention_heads, self.attention_head_size).transpose(1, 2)
 
+        # Compute attention weights
         attn_weights = torch.matmul(query_layer, key_layer.transpose(-1, -2))
         attn_weights = attn_weights * (self.attention_head_size ** -0.5)
 
+        # Apply attention mask if provided
         if attention_mask is not None:
             attn_weights = attn_weights + attention_mask
 
+        # Apply softmax without explicit dtype conversion for precision alignment
         attn_weights = F.softmax(attn_weights, dim=-1)
         attn_weights = self.dropout(attn_weights)
 
+        # Compute attention output
         attn_output = torch.matmul(attn_weights, value_layer)
         attn_output = attn_output.transpose(1, 2).reshape(bsz, seq_len, -1).contiguous()
 
@@ -167,9 +175,10 @@ class ElectraModel(nn.Module):
         if self.embeddings_project is not None:
             embedding_output = self.embeddings_project(embedding_output)
 
-        # Create extended attention mask for encoder
+        # Create extended attention mask for encoder with proper dtype handling
         if attention_mask is not None:
             extended_attention_mask = attention_mask[:, None, None, :]
+            # Use torch.finfo().min for causal masking to ensure precision alignment
             extended_attention_mask = (1.0 - extended_attention_mask) * torch.finfo(embedding_output.dtype).min
         else:
             extended_attention_mask = None
@@ -210,30 +219,41 @@ class ElectraForCausalLM(nn.Module):
 
 
 class ElectraConfig:
+    """Static configuration for ELECTRA model (google/electra-small-discriminator)"""
     def __init__(self):
-        # google/electra-small-discriminator configuration
+        # Vocabulary and embedding configuration
         self.vocab_size = 30522
         self.embedding_size = 128
         self.hidden_size = 256
+        self.max_position_embeddings = 512
+        self.type_vocab_size = 2
+
+        # Model architecture configuration
         self.num_hidden_layers = 12
         self.num_attention_heads = 4
         self.intermediate_size = 1024
+
+        # Regularization parameters
         self.hidden_dropout_prob = 0.1
         self.attention_probs_dropout_prob = 0.1
-        self.max_position_embeddings = 512
-        self.type_vocab_size = 2
         self.layer_norm_eps = 1e-12
+
+        # Special token IDs
         self.pad_token_id = 0
 
 
 class Model(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, config):
         super().__init__()
-        config = ElectraConfig()
+        # Initialize model with provided ElectraConfig
         self.model = ElectraForCausalLM(config)
 
     def forward(self, x):
         return self.model(x)
+
+    def get_init_inputs(self):
+        # Return ElectraConfig instance for initialization
+        return [ElectraConfig()]
 
 
 # Benchmark configuration
@@ -245,7 +265,3 @@ batch_size = 32
 def get_inputs():
     inputs = torch.randint(0, vocab_size, (batch_size, sequence_length))
     return [inputs]
-
-
-def get_init_inputs():
-    return []

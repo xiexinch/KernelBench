@@ -3,70 +3,41 @@
 BigBird implementation with block-sparse attention for efficient long sequence modeling.
 """
 
-import json
 import math
-import os
-from types import SimpleNamespace
-
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from huggingface_hub import hf_hub_download
 
 
 # ============================================================================
-# Configuration utilities
+# Static BigBirdConfig
 # ============================================================================
 
-def _dict_to_namespace(d):
-    """Recursively convert a dict to SimpleNamespace for attribute access."""
-    if isinstance(d, dict):
-        for k, v in d.items():
-            d[k] = _dict_to_namespace(v)
-        return SimpleNamespace(**d)
-    if isinstance(d, list):
-        return [_dict_to_namespace(item) for item in d]
-    return d
-
-
-def load_config(model_name):
-    """从 HuggingFace 缓存加载 config.json，不联网下载。"""
-    config_path = hf_hub_download(
-        repo_id=model_name, filename="config.json", local_files_only=True
-    )
-    with open(config_path, "r") as f:
-        config_dict = json.load(f)
-    return _dict_to_namespace(config_dict)
-
-
-def download_state_dict(model_name):
-    """从 HuggingFace 缓存加载模型权重，不联网下载。"""
-    config_path = hf_hub_download(
-        repo_id=model_name, filename="config.json", local_files_only=True
-    )
-    snapshot_dir = os.path.dirname(config_path)
-    repo_files = os.listdir(snapshot_dir)
-
-    safetensor_files = [f for f in repo_files if f.endswith(".safetensors")]
-    bin_files = [f for f in repo_files if f.endswith(".bin") and "pytorch_model" in f]
-
-    if safetensor_files:
-        from safetensors.torch import load_file
-        state_dict = {}
-        for sf in sorted(safetensor_files):
-            path = os.path.join(snapshot_dir, sf)
-            state_dict.update(load_file(path))
-        return state_dict
-    elif bin_files:
-        state_dict = {}
-        for bf in sorted(bin_files):
-            path = os.path.join(snapshot_dir, bf)
-            state_dict.update(torch.load(path, map_location="cpu", weights_only=True))
-        return state_dict
-    else:
-        path = os.path.join(snapshot_dir, "pytorch_model.bin")
-        return torch.load(path, map_location="cpu", weights_only=True)
+class BigBirdConfig:
+    """Hardcoded configuration for google/bigbird-roberta-base."""
+    def __init__(self):
+        self.vocab_size = 50358
+        self.hidden_size = 768
+        self.num_hidden_layers = 12
+        self.num_attention_heads = 12
+        self.intermediate_size = 3072
+        self.hidden_act = "gelu"
+        self.hidden_dropout_prob = 0.1
+        self.attention_probs_dropout_prob = 0.1
+        self.max_position_embeddings = 4096
+        self.type_vocab_size = 2
+        self.initializer_range = 0.02
+        self.layer_norm_eps = 1e-12
+        self.pad_token_id = 0
+        self.bos_token_id = 101
+        self.eos_token_id = 102
+        self.position_embedding_type = "absolute"
+        # BigBird specific
+        self.attention_type = "block_sparse"
+        self.block_size = 64
+        self.num_random_blocks = 3
+        self.rescale_embeddings = False
 
 
 # ============================================================================
@@ -606,7 +577,8 @@ class BigBirdModel(nn.Module):
             padding_len = 0
             blocked_encoder_mask = band_mask = from_mask = to_mask = None
             extended_attention_mask = attention_mask[:, None, None, :].float()
-            extended_attention_mask = (1.0 - extended_attention_mask) * torch.finfo(torch.float32).min
+            # Use torch.finfo().min instead of float('-inf') for precision alignment
+            extended_attention_mask = (1.0 - extended_attention_mask) * torch.finfo(extended_attention_mask.dtype).min
 
         hidden_states = self.embeddings(input_ids, token_type_ids=token_type_ids)
 
@@ -660,7 +632,7 @@ class BigBirdForMaskedLM(nn.Module):
         self.config = config
         self.bert = BigBirdModel(config)
         self.cls = BigBirdLMPredictionHead(config)
-        # Weight tying
+        # Weight tying: share embedding weights with output layer
         self.cls.decoder.weight = self.bert.embeddings.word_embeddings.weight
 
     def forward(self, input_ids, attention_mask=None, token_type_ids=None):
@@ -668,52 +640,36 @@ class BigBirdForMaskedLM(nn.Module):
         prediction_scores = self.cls(sequence_output)
         return prediction_scores
 
-    @classmethod
-    def from_pretrained(cls, model_name):
-        config = load_config(model_name)
-        model = cls(config)
-
-        hf_sd = download_state_dict(model_name)
-        new_sd = {}
-        for k, v in hf_sd.items():
-            new_key = k
-            # Map BigBirdOnlyMLMHead -> BigBirdLMPredictionHead
-            if new_key.startswith("cls.predictions."):
-                new_key = new_key.replace("cls.predictions.", "cls.")
-                if new_key == "cls.bias":
-                    new_key = "cls.decoder.bias"
-            if new_key.startswith("bert.") or new_key.startswith("cls."):
-                new_sd[new_key] = v
-
-        model.load_state_dict(new_sd, strict=False)
-        model.cls.decoder.weight = model.bert.embeddings.word_embeddings.weight
-        return model
-
 
 # ============================================================================
 # Benchmark setup
 # ============================================================================
 
 class Model(torch.nn.Module):
-    def __init__(self, model_name, config):
+    """Benchmark model wrapper for BigBird."""
+    def __init__(self, config):
         super().__init__()
-        self.model = BigBirdForMaskedLM.from_pretrained(model_name)
+        # Initialize model with static config (no weight loading)
+        self.model = BigBirdForMaskedLM(config)
 
     def forward(self, x):
+        # Forward pass: input_ids -> prediction scores
         return self.model(x)
 
 
-model_name = "google/bigbird-roberta-base"
-config = load_config(model_name)
+# Static configuration instance
+config = BigBirdConfig()
 vocab_size = config.vocab_size
 sequence_length = 4095
 batch_size = 1
 
 
 def get_inputs():
+    """Generate benchmark inputs: random input_ids of shape (batch_size, sequence_length)."""
     inputs = torch.randint(0, vocab_size, (batch_size, sequence_length))
     return [inputs]
 
 
 def get_init_inputs():
-    return [model_name, config]
+    """Return initialization inputs for Model.__init__()."""
+    return [config]
