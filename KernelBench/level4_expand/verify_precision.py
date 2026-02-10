@@ -129,7 +129,7 @@ def _get_ref_prefix(model_type):
 def _opt_ref_key_to_hf_key(ref_key):
     """HF OPT 的 lm_head 在顶层 (lm_head.xxx)，ref 为 model.lm_head.xxx；decoder 均为 model.decoder.xxx。"""
     if ref_key.startswith("model.lm_head."):
-        return ref_key[7:]  # "lm_head.xxx"
+        return ref_key[6:]  # 剥掉 "model."（6 字符）-> "lm_head.xxx"
     return ref_key
 
 
@@ -140,19 +140,36 @@ def _opt_hf_key_to_ref_key(hf_key):
     return hf_key
 
 
-def _compare_state_dicts(hf_sd, ref_sd, ref_prefix="model.", allow_extra_in_hf=False, allow_missing_in_ref=False, ref_key_to_hf_key=None):
+def _bart_ref_key_to_hf_key(ref_key):
+    """BART: ref 为 model.xxx；HF 的 lm_head 在顶层。忽略 ref 独有 buffer（如 causal_mask_base）。"""
+    if ref_key.startswith("model.lm_head."):
+        return ref_key[6:]  # "lm_head.xxx"
+    if ".causal_mask_base" in ref_key or ref_key.endswith("causal_mask_base"):
+        return None  # ref 独有 buffer，不参与键集合比较
+    return ref_key
+
+
+def _bart_hf_key_to_ref_key(hf_key):
+    """BART 权重复制：HF lm_head.xxx -> ref model.lm_head.xxx。"""
+    if hf_key.startswith("lm_head."):
+        return "model." + hf_key
+    return hf_key
+
+
+def _compare_state_dicts(hf_sd, ref_sd, ref_prefix="model.", allow_extra_in_hf=False, allow_missing_in_ref=False, allow_extra_in_ref=False, ref_key_to_hf_key=None):
     """Compare state_dict keys and shapes. Return (match, mismatches).
     allow_extra_in_hf: 若 True，只要求 ref 的键都在 HF 中且 shape 一致，HF 可多出键。
     allow_missing_in_ref: 若 True（如 BART ref 无 encoder_attn），不把 HF 有而 ref 无的键记为 mismatch。
-    ref_key_to_hf_key: 可选，将 ref 键名映射为 HF 键名（用于 OPT 等）。
+    allow_extra_in_ref: 若 True（如 BART ref 有 causal_mask_base 等），不把 ref 多出的键记为 mismatch。
+    ref_key_to_hf_key: 可选，ref_key -> hf_key 或 None（忽略该 ref 键）。用于 OPT/BART 等。
     """
     hf_keys = sorted(hf_sd.keys())
     ref_keys = sorted(ref_sd.keys())
 
     if ref_key_to_hf_key is not None:
         ref_keys_bare = [ref_key_to_hf_key(k) for k in ref_keys]
+        ref_keys_bare = [b for b in ref_keys_bare if b is not None]  # 忽略返回 None 的 ref 键
         def resolve_ref_key(hf_key):
-            # 已知 hf_key，找 ref 里对应的 key（用于 shape 比较）
             for rk in ref_keys:
                 if ref_key_to_hf_key(rk) == hf_key:
                     return rk
@@ -171,8 +188,9 @@ def _compare_state_dicts(hf_sd, ref_sd, ref_prefix="model.", allow_extra_in_hf=F
         if not allow_extra_in_hf and not allow_missing_in_ref:
             for k in hf_set - ref_set:
                 mismatches.append(("missing_in_ref", k, None))
-        for k in ref_set - hf_set:
-            mismatches.append(("extra_in_ref", k, None))
+        if not allow_extra_in_ref:
+            for k in ref_set - hf_set:
+                mismatches.append(("extra_in_ref", k, None))
     if allow_extra_in_hf and not ref_set.issubset(hf_set):
         for k in ref_set - hf_set:
             mismatches.append(("ref_key_not_in_hf", k, None))
@@ -245,12 +263,13 @@ def verify_file(file_num, model_name, batch_size, sequence_length, model_type, b
         # Compare state_dict structure（OPT 需将 ref 的 model.lm_head.xxx 映射为 lm_head.xxx）
         ref_prefix = _get_ref_prefix(model_type)
         allow_extra_in_hf = model_type in ("bigbird", "reformer")
-        ref_key_to_hf_key = _opt_ref_key_to_hf_key if model_type == "opt" else None
-        allow_missing_in_ref = model_type == "bart"  # ref 无 encoder_attn，只比较共有键
+        ref_key_to_hf_key = _opt_ref_key_to_hf_key if model_type == "opt" else (_bart_ref_key_to_hf_key if model_type == "bart" else None)
+        allow_missing_in_ref = model_type == "bart"  # ref 无 encoder_attn
+        allow_extra_in_ref = model_type == "bart"    # ref 有 causal_mask_base 等
         hf_sd = original_model.state_dict()
         ref_sd = refactored_model.state_dict()
         sd_match, sd_mismatches = _compare_state_dicts(
-            hf_sd, ref_sd, ref_prefix, allow_extra_in_hf, allow_missing_in_ref, ref_key_to_hf_key
+            hf_sd, ref_sd, ref_prefix, allow_extra_in_hf, allow_missing_in_ref, allow_extra_in_ref, ref_key_to_hf_key
         )
 
         if not sd_match:
@@ -262,10 +281,13 @@ def verify_file(file_num, model_name, batch_size, sequence_length, model_type, b
         else:
             print("  [OK] state_dict keys/shapes compatible")
 
-        # Copy weights from HF to refactored (in-place). OPT 的 lm_head 需 hf_key -> model.lm_head.xxx
+        # Copy weights from HF to refactored (in-place). OPT/BART 的 lm_head 需 hf_key -> model.lm_head.xxx
         def resolve_ref_key_for_copy(hf_key):
             if model_type == "opt":
                 return _opt_hf_key_to_ref_key(hf_key)
+            if model_type == "bart":
+                ref_key = _bart_hf_key_to_ref_key(hf_key)
+                return ref_key if ref_key in ref_sd else (hf_key if hf_key in ref_sd else None)
             for candidate in (hf_key, "model." + hf_key):
                 if candidate in ref_sd:
                     return candidate
