@@ -227,17 +227,18 @@ class OPTDecoder(nn.Module):
         if self.project_in is not None:
             inputs_embeds = self.project_in(inputs_embeds)
 
-        hidden_states = inputs_embeds + pos_embeds
+        # 与 HF 一致：pos_embeds 与 inputs_embeds 同 device
+        hidden_states = inputs_embeds + pos_embeds.to(inputs_embeds.device)
 
-        # Create causal mask: 1 for future positions, 0 for past/current
+        # 与 HF _prepare_4d_causal_attention_mask 一致：full(min_dtype) -> triu(diagonal=1) -> expand
         bsz, seq_len = input_ids.shape
-        causal_mask = torch.triu(
-            torch.ones(seq_len, seq_len, dtype=torch.bool, device=input_ids.device), diagonal=1
+        min_dtype = torch.finfo(hidden_states.dtype).min
+        causal_mask = torch.full(
+            (seq_len, seq_len), fill_value=min_dtype, dtype=hidden_states.dtype, device=hidden_states.device
         )
-        # Unsqueeze for batch and num_heads dimensions
-        causal_mask = causal_mask.unsqueeze(0).unsqueeze(0)
-        # Use torch.finfo().min instead of float('-inf') for numerical stability
-        causal_mask = causal_mask.to(hidden_states.dtype) * torch.finfo(hidden_states.dtype).min
+        if seq_len != 1:
+            causal_mask = torch.triu(causal_mask, diagonal=1)
+        causal_mask = causal_mask.unsqueeze(0).unsqueeze(0).expand(bsz, 1, -1, -1)
 
         # Apply decoder layers
         for layer in self.layers:
