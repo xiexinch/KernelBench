@@ -46,6 +46,7 @@ FILES = [
 THRESHOLD = 1e-5
 # 部分模型因结构差异（如 BART ref 无 encoder_attn）导致略超 1e-5 时，可单独放宽
 FILE_THRESHOLD_OVERRIDE = {6: 1e-4, 17: 1e-4, 20: 1e-4}  # BART: 约 8e-6，放宽以通过
+VERIFY_SCRIPT_VERSION = "opt-bart-fix-v1"
 NUM_TRIALS = 3
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
@@ -186,10 +187,14 @@ def _compare_state_dicts(hf_sd, ref_sd, ref_prefix="model.", allow_extra_in_hf=F
     return len(mismatches) == 0, mismatches
 
 
-def verify_file(file_num, model_name, batch_size, sequence_length, model_type):
+def verify_file(file_num, model_name, batch_size, sequence_length, model_type, base_threshold=THRESHOLD):
     """Verify precision for a single benchmark file using random init."""
     print(f"\n{'='*60}")
     print(f"File {file_num}: {model_name} (bs={batch_size}, seq={sequence_length})")
+    if model_type == "opt":
+        print("  [OPT] using lm_head key mapping (model.lm_head.xxx <-> lm_head.xxx)")
+    if model_type == "bart" and file_num in FILE_THRESHOLD_OVERRIDE:
+        print(f"  [BART] allow_missing_in_ref, threshold={FILE_THRESHOLD_OVERRIDE[file_num]:.0e}")
     print(f"{'='*60}")
 
     try:
@@ -310,7 +315,7 @@ def verify_file(file_num, model_name, batch_size, sequence_length, model_type):
 
         avg_error = sum(max_errors) / len(max_errors)
         worst_error = max(max_errors)
-        effective_threshold = FILE_THRESHOLD_OVERRIDE.get(file_num, THRESHOLD)
+        effective_threshold = FILE_THRESHOLD_OVERRIDE.get(file_num, base_threshold)
         passed = worst_error <= effective_threshold and sd_match
 
         status = "PASS" if passed else "FAIL"
@@ -367,7 +372,8 @@ def main():
     files_to_verify = args.files or [f[0] for f in FILES]
 
     print("Precision Verification Report (Random Init - No Weight Download)")
-    print(f"Threshold: {threshold}")
+    print(f"Script version: {VERIFY_SCRIPT_VERSION}")
+    print(f"Threshold: {threshold} (BART files 6,17,20 use {FILE_THRESHOLD_OVERRIDE.get(6, threshold):.0e})")
     print(f"Files: {files_to_verify}")
     print(f"Device: {DEVICE}")
 
@@ -377,7 +383,7 @@ def main():
         model_type = entry[4] if len(entry) > 4 else "auto"
         if file_num not in files_to_verify:
             continue
-        result = verify_file(file_num, model_name, bs, seq, model_type)
+        result = verify_file(file_num, model_name, bs, seq, model_type, base_threshold=threshold)
         results.append(result)
 
         # 每个文件完成后显式回收，避免大模型累积导致 OOM
