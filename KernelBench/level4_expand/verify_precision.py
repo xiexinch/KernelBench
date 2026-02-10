@@ -65,7 +65,6 @@ def _copy_original_weights_to_refactored(original_model, refactored_model):
     # raise '321'
     for hf_key, hf_value in original_sd.items():
         ref_key = "model." + hf_key
-        # ref_key = hf_key
         if ref_key not in refactored_sd:
             print(
                 f"  [WARN] {ref_key} not found in refactored model, hf_key: {hf_key}, ref_key: {ref_key}"
@@ -122,12 +121,6 @@ def verify_file(file_num, model_name, batch_size, sequence_length):
         refactored_module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(refactored_module)
 
-        # Get init inputs and create refactored model
-        init_inputs = refactored_module.get_init_inputs()
-        RefactoredModel = refactored_module.Model
-        refactored_model = RefactoredModel(*init_inputs)
-        refactored_model.eval()
-
         # Load original model（与 refactored 使用同一权重：先加载 original，再复制到 refactored）
         from transformers import AutoModelForCausalLM, AutoConfig
 
@@ -137,6 +130,12 @@ def verify_file(file_num, model_name, batch_size, sequence_length):
             model_name, config=hf_config
         )
         original_model.eval()
+
+        # Get init inputs and create refactored model
+        # init_inputs = refactored_module.get_init_inputs()
+        RefactoredModel = refactored_module.Model
+        refactored_model = RefactoredModel(*hf_config)
+        refactored_model.eval()
 
         # 将 original 的权重复制到 refactored，确保对比时两边使用同一权重
         _copy_original_weights_to_refactored(original_model, refactored_model)

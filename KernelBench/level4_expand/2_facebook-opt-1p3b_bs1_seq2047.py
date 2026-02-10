@@ -23,12 +23,12 @@ class OPTConfig:
     """Static hardcoded OPT-1.3B configuration."""
     def __init__(self):
         self.vocab_size = 50272
-        self.hidden_size = 768
+        self.hidden_size = 2048
         self.num_hidden_layers = 24
-        self.ffn_dim = 3072
+        self.ffn_dim = 8192
         self.max_position_embeddings = 2048
-        self.num_attention_heads = 12
-        self.word_embed_proj_dim = 768
+        self.num_attention_heads = 32
+        self.word_embed_proj_dim = 2048
         self.dropout = 0.1
         self.activation_function = "relu"
         self.do_layer_norm_before = True

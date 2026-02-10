@@ -19,14 +19,14 @@ class GPTNeoConfigExpanded:
     """GPT-Neo configuration (consistent with EleutherAI/gpt-neo-2.7B defaults)"""
     vocab_size = 50257
     max_position_embeddings = 2048
-    hidden_size = 1536
-    num_layers = 24
-    num_heads = 24
+    hidden_size = 2560
+    num_layers = 32
+    num_heads = 20
     layer_norm_epsilon = 1e-5
-    attention_dropout = 0.1
-    embed_dropout = 0.1
-    resid_dropout = 0.1
-    attention_layers = ["global"] * 24
+    attention_dropout = 0
+    embed_dropout = 0
+    resid_dropout = 0
+    attention_layers = ["global"] * 32
     window_size = 256
 
 
