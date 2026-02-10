@@ -39,16 +39,38 @@ FILES = [
 
 THRESHOLD = 1e-5
 NUM_TRIALS = 3
-DEVICE = "cpu"
+DEVICE = "cuda:0"
 
 
 def load_original_model(model_name, config):
     """Load original HuggingFace model."""
     from transformers import AutoModelForCausalLM, AutoConfig
+
     hf_config = AutoConfig.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(model_name, config=hf_config)
     model.eval()
     return model
+
+
+def _copy_original_weights_to_refactored(original_model, refactored_model):
+    """将 HuggingFace original 模型的权重复制到 refactored 模型，确保对比使用同一权重。
+
+    refactored 的 Model 将实际模型放在 .model 下，故 state_dict 的 key 为 "model." + 内部 key。
+    按此规则将 original 的 state_dict 拷贝到 refactored 的 state_dict 并 load 回去。
+    """
+    original_sd = original_model.state_dict()
+    refactored_sd = refactored_model.state_dict()
+    for hf_key, hf_value in original_sd.items():
+        ref_key = "model." + hf_key
+        if ref_key not in refactored_sd:
+            continue
+        ref_param = refactored_sd[ref_key]
+        if ref_param.shape != hf_value.shape:
+            continue
+        refactored_sd[ref_key] = hf_value.to(
+            device=ref_param.device, dtype=ref_param.dtype
+        ).clone()
+    refactored_model.load_state_dict(refactored_sd, strict=False)
 
 
 def verify_file(file_num, model_name, batch_size, sequence_length):
@@ -96,11 +118,17 @@ def verify_file(file_num, model_name, batch_size, sequence_length):
         refactored_model = RefactoredModel(*init_inputs)
         refactored_model.eval()
 
-        # Load original model
+        # Load original model（与 refactored 使用同一权重：先加载 original，再复制到 refactored）
         from transformers import AutoModelForCausalLM, AutoConfig
+
         hf_config = AutoConfig.from_pretrained(model_name)
-        original_model = AutoModelForCausalLM.from_pretrained(model_name, config=hf_config)
+        original_model = AutoModelForCausalLM.from_pretrained(
+            model_name, config=hf_config
+        )
         original_model.eval()
+
+        # 将 original 的权重复制到 refactored，确保对比时两边使用同一权重
+        _copy_original_weights_to_refactored(original_model, refactored_model)
 
         vocab_size = refactored_module.vocab_size
 
@@ -122,7 +150,9 @@ def verify_file(file_num, model_name, batch_size, sequence_length):
         passed = worst_error <= THRESHOLD
 
         status = "PASS" if passed else "FAIL"
-        print(f"  Worst error: {worst_error:.2e}, Avg error: {avg_error:.2e} [{status}]")
+        print(
+            f"  Worst error: {worst_error:.2e}, Avg error: {avg_error:.2e} [{status}]"
+        )
 
         return {
             "file_num": file_num,
@@ -147,11 +177,23 @@ def verify_file(file_num, model_name, batch_size, sequence_length):
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Verify precision of refactored models")
-    parser.add_argument("--files", type=int, nargs="*", default=None,
-                        help="Specific file numbers to verify (default: all)")
-    parser.add_argument("--threshold", type=float, default=THRESHOLD,
-                        help=f"Maximum absolute error threshold (default: {THRESHOLD})")
+
+    parser = argparse.ArgumentParser(
+        description="Verify precision of refactored models"
+    )
+    parser.add_argument(
+        "--files",
+        type=int,
+        nargs="*",
+        default=None,
+        help="Specific file numbers to verify (default: all)",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=THRESHOLD,
+        help=f"Maximum absolute error threshold (default: {THRESHOLD})",
+    )
     args = parser.parse_args()
 
     threshold = args.threshold
@@ -183,7 +225,9 @@ def main():
             passed += 1
         else:
             failed += 1
-        print(f"{r['file_num']:>5} {r['model_name']:<45} {r['worst_error']:>12.2e} {status:>6}")
+        print(
+            f"{r['file_num']:>5} {r['model_name']:<45} {r['worst_error']:>12.2e} {status:>6}"
+        )
 
     print("-" * 70)
     print(f"Total: {passed} passed, {failed} failed out of {len(results)} tested")
