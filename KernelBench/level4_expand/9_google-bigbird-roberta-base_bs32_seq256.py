@@ -22,7 +22,7 @@ class BigBirdConfig:
         self.num_hidden_layers = 12
         self.num_attention_heads = 12
         self.intermediate_size = 3072
-        self.hidden_act = "gelu"
+        self.hidden_act = "gelu_new"
         self.hidden_dropout_prob = 0.1
         self.attention_probs_dropout_prob = 0.1
         self.max_position_embeddings = 4096
@@ -411,34 +411,51 @@ class BigBirdSelfOutput(nn.Module):
 
 
 class BigBirdAttention(nn.Module):
-    """Aligned with official HF: uses original_full when band_mask is None (short seq)."""
+    """Aligned with official HF: single self module, dynamically switches attention type."""
     def __init__(self, config, seed=None):
         super().__init__()
         self.attention_type = config.attention_type
         self.config = config
         self.seed = seed
-        self.self_full = BigBirdSelfAttention(config)
-        if self.attention_type == "block_sparse":
-            self.self_block = BigBirdBlockSparseAttention(config, seed)
+
+        if self.config.attention_type == "original_full":
+            self.self = BigBirdSelfAttention(config)
+        elif self.config.attention_type == "block_sparse":
+            self.self = BigBirdBlockSparseAttention(config, seed)
         else:
-            self.self_block = None
+            raise ValueError(f"Unknown attention_type: {self.config.attention_type}")
+
         self.output = BigBirdSelfOutput(config)
+
+    def set_attention_type(self, value: str):
+        if value not in ["original_full", "block_sparse"]:
+            raise ValueError(f"attention_type must be 'original_full' or 'block_sparse', got {value}")
+        if value == self.attention_type:
+            return
+        self.attention_type = value
+        if value == "original_full":
+            attn_weights = BigBirdSelfAttention(self.config)
+        else:
+            attn_weights = BigBirdBlockSparseAttention(self.config, self.seed)
+        attn_weights.query = self.self.query
+        attn_weights.value = self.self.value
+        attn_weights.key = self.self.key
+        self.self = attn_weights
+        if not self.training:
+            self.self.eval()
 
     def forward(self, hidden_states, attention_mask=None, band_mask=None, from_mask=None,
                 to_mask=None, from_blocked_mask=None, to_blocked_mask=None):
-        use_full = (self.attention_type == "original_full" or
-                    (band_mask is None and from_mask is None))
-        if use_full:
-            self_outputs = self.self_full(hidden_states, attention_mask=attention_mask)
+        if band_mask is not None:
+            band_mask = band_mask.to(hidden_states.dtype)
+        if from_mask is not None:
+            from_mask = from_mask.to(hidden_states.dtype)
+        if to_mask is not None:
+            to_mask = to_mask.to(hidden_states.dtype)
+        if self.attention_type == "original_full":
+            self_outputs = self.self(hidden_states, attention_mask=attention_mask)
         else:
-            # Cast masks to hidden_states dtype
-            if band_mask is not None:
-                band_mask = band_mask.to(hidden_states.dtype)
-            if from_mask is not None:
-                from_mask = from_mask.to(hidden_states.dtype)
-            if to_mask is not None:
-                to_mask = to_mask.to(hidden_states.dtype)
-            self_outputs = self.self_block(
+            self_outputs = self.self(
                 hidden_states, band_mask, from_mask, to_mask, from_blocked_mask, to_blocked_mask
             )
 
@@ -450,10 +467,20 @@ class BigBirdIntermediate(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
+        # Match HF: use config.hidden_act (default gelu_new for bigbird-roberta-base)
+        hidden_act = getattr(config, "hidden_act", "gelu_new")
+        if hidden_act == "gelu_new":
+            self.act_fn = lambda x: F.gelu(x, approximate="tanh")
+        elif hidden_act == "gelu":
+            self.act_fn = F.gelu
+        elif hidden_act == "relu":
+            self.act_fn = F.relu
+        else:
+            self.act_fn = F.gelu
 
     def forward(self, hidden_states):
         hidden_states = self.dense(hidden_states)
-        hidden_states = F.gelu(hidden_states)
+        hidden_states = self.act_fn(hidden_states)
         return hidden_states
 
 
@@ -476,9 +503,16 @@ class BigBirdOutput(nn.Module):
 class BigBirdLayer(nn.Module):
     def __init__(self, config, seed=None):
         super().__init__()
+        self.attention_type = config.attention_type
         self.attention = BigBirdAttention(config, seed=seed)
         self.intermediate = BigBirdIntermediate(config)
         self.output = BigBirdOutput(config)
+
+    def set_attention_type(self, value: str, layer_idx=None):
+        if value == self.attention_type:
+            return
+        self.attention_type = value
+        self.attention.set_attention_type(value)
 
     def forward(self, hidden_states, attention_mask=None, band_mask=None, from_mask=None,
                 to_mask=None, blocked_encoder_mask=None):
@@ -500,6 +534,13 @@ class BigBirdEncoder(nn.Module):
         self.layer = nn.ModuleList([
             BigBirdLayer(config, seed=layer_idx) for layer_idx in range(config.num_hidden_layers)
         ])
+
+    def set_attention_type(self, value: str):
+        if value == self.attention_type:
+            return
+        self.attention_type = value
+        for i, layer in enumerate(self.layer):
+            layer.set_attention_type(value, layer_idx=i)
 
     def forward(self, hidden_states, attention_mask=None, band_mask=None, from_mask=None,
                 to_mask=None, blocked_encoder_mask=None):
@@ -561,6 +602,12 @@ class BigBirdModel(nn.Module):
 
         return blocked_encoder_mask, band_mask, from_mask, to_mask
 
+    def set_attention_type(self, value: str):
+        if value == self.attention_type:
+            return
+        self.attention_type = value
+        self.encoder.set_attention_type(value)
+
     def forward(self, input_ids, attention_mask=None, token_type_ids=None):
         bsz, orig_seq_len = input_ids.shape
 
@@ -569,10 +616,13 @@ class BigBirdModel(nn.Module):
         if token_type_ids is None:
             token_type_ids = torch.zeros(bsz, orig_seq_len, dtype=torch.long, device=input_ids.device)
 
-        min_seq_for_block_sparse = 5 * self.block_size
-        use_block_sparse = (self.attention_type == "block_sparse" and
-                            orig_seq_len >= min_seq_for_block_sparse)
-        if use_block_sparse:
+        # Match HF: dynamically switch to original_full when seq too short for block_sparse
+        num_random = getattr(self.config, 'num_random_blocks', 3)
+        min_seq = (2 + 3 + num_random + num_random) * self.block_size
+        if self.attention_type == "block_sparse" and orig_seq_len <= min_seq:
+            self.set_attention_type("original_full")
+
+        if self.attention_type == "block_sparse":
             padding_len, input_ids, attention_mask, token_type_ids = self._pad_to_block_size(
                 input_ids, attention_mask, token_type_ids
             )
@@ -603,16 +653,26 @@ class BigBirdModel(nn.Module):
 
 
 class BigBirdPredictionHeadTransform(nn.Module):
-    """Prediction head transform: dense → gelu → LayerNorm."""
+    """Prediction head transform: dense → activation → LayerNorm."""
 
     def __init__(self, config):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        # Match HF: use config.hidden_act (default gelu_new for bigbird-roberta-base)
+        hidden_act = getattr(config, "hidden_act", "gelu_new")
+        if hidden_act == "gelu_new":
+            self.transform_act_fn = lambda x: F.gelu(x, approximate="tanh")
+        elif hidden_act == "gelu":
+            self.transform_act_fn = F.gelu
+        elif hidden_act == "relu":
+            self.transform_act_fn = F.relu
+        else:
+            self.transform_act_fn = F.gelu
 
     def forward(self, hidden_states):
         hidden_states = self.dense(hidden_states)
-        hidden_states = F.gelu(hidden_states)
+        hidden_states = self.transform_act_fn(hidden_states)
         hidden_states = self.LayerNorm(hidden_states)
         return hidden_states
 

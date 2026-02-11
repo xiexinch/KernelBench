@@ -22,7 +22,7 @@ class BigBirdConfig:
         self.num_hidden_layers = 12
         self.num_attention_heads = 12
         self.intermediate_size = 3072
-        self.hidden_act = "gelu"
+        self.hidden_act = "gelu_new"
         self.hidden_dropout_prob = 0.1
         self.attention_probs_dropout_prob = 0.1
         self.max_position_embeddings = 4096
@@ -451,10 +451,20 @@ class BigBirdIntermediate(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
+        # Match HF: use config.hidden_act (default gelu_new for bigbird-roberta-base)
+        hidden_act = getattr(config, "hidden_act", "gelu_new")
+        if hidden_act == "gelu_new":
+            self.act_fn = lambda x: F.gelu(x, approximate="tanh")
+        elif hidden_act == "gelu":
+            self.act_fn = F.gelu
+        elif hidden_act == "relu":
+            self.act_fn = F.relu
+        else:
+            self.act_fn = F.gelu
 
     def forward(self, hidden_states):
         hidden_states = self.dense(hidden_states)
-        hidden_states = F.gelu(hidden_states)
+        hidden_states = self.act_fn(hidden_states)
         return hidden_states
 
 
@@ -601,16 +611,26 @@ class BigBirdModel(nn.Module):
 
 
 class BigBirdPredictionHeadTransform(nn.Module):
-    """Prediction head transform: dense → gelu → LayerNorm."""
+    """Prediction head transform: dense → activation → LayerNorm."""
 
     def __init__(self, config):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        # Match HF: use config.hidden_act (default gelu_new for bigbird-roberta-base)
+        hidden_act = getattr(config, "hidden_act", "gelu_new")
+        if hidden_act == "gelu_new":
+            self.transform_act_fn = lambda x: F.gelu(x, approximate="tanh")
+        elif hidden_act == "gelu":
+            self.transform_act_fn = F.gelu
+        elif hidden_act == "relu":
+            self.transform_act_fn = F.relu
+        else:
+            self.transform_act_fn = F.gelu
 
     def forward(self, hidden_states):
         hidden_states = self.dense(hidden_states)
-        hidden_states = F.gelu(hidden_states)
+        hidden_states = self.transform_act_fn(hidden_states)
         hidden_states = self.LayerNorm(hidden_states)
         return hidden_states
 
