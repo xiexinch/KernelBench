@@ -264,8 +264,9 @@ class OPTForCausalLM(nn.Module):
         self.decoder = OPTDecoder(config)
         # LM head for next token prediction
         self.lm_head = nn.Linear(config.word_embed_proj_dim, config.vocab_size, bias=False)
-        # Weight tying: share weights between embedding and output layer
-        self.lm_head.weight = self.decoder.embed_tokens.weight
+        # Weight tying: only share weights when config says so
+        if getattr(config, 'tie_word_embeddings', True):
+            self.lm_head.weight = self.decoder.embed_tokens.weight
 
     def forward(self, input_ids, attention_mask=None):
         # Get decoder output

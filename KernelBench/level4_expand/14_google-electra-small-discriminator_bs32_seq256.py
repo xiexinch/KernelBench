@@ -175,17 +175,20 @@ class ElectraModel(nn.Module):
         if self.embeddings_project is not None:
             embedding_output = self.embeddings_project(embedding_output)
 
-        # ElectraForCausalLM 与 HF 一致：is_decoder=True 时使用因果 mask
+        # Match HF behavior: only use causal mask when is_decoder=True
         bsz, seq_len = embedding_output.shape[:2]
+        is_decoder = getattr(self.config, 'is_decoder', False)
         if attention_mask is not None:
             extended_attention_mask = attention_mask[:, None, None, :]
             extended_attention_mask = (1.0 - extended_attention_mask) * torch.finfo(embedding_output.dtype).min
-        else:
+        elif is_decoder:
             causal_mask = torch.triu(
                 torch.ones(seq_len, seq_len, dtype=torch.bool, device=embedding_output.device), diagonal=1
             )
             extended_attention_mask = causal_mask.unsqueeze(0).unsqueeze(0).to(embedding_output.dtype)
             extended_attention_mask = extended_attention_mask * torch.finfo(embedding_output.dtype).min
+        else:
+            extended_attention_mask = None
 
         encoder_output = self.encoder(embedding_output, attention_mask=extended_attention_mask)
         return encoder_output
@@ -211,8 +214,9 @@ class ElectraForCausalLM(nn.Module):
         self.electra = ElectraModel(config)
         self.generator_predictions = ElectraGeneratorPredictions(config)
         self.generator_lm_head = nn.Linear(config.embedding_size, config.vocab_size)
-        # Weight tying
-        self.generator_lm_head.weight = self.electra.embeddings.word_embeddings.weight
+        # Weight tying: only share weights when config says so
+        if getattr(config, 'tie_word_embeddings', True):
+            self.generator_lm_head.weight = self.electra.embeddings.word_embeddings.weight
 
     def forward(self, input_ids, attention_mask=None, token_type_ids=None):
         hidden_states = self.electra(input_ids, attention_mask=attention_mask,

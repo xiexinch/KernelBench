@@ -24,50 +24,73 @@ def _stable_argsort(vector, dim):
 
 
 class AxialPositionEmbeddings(nn.Module):
-    """Factorized 2D position embeddings: [64, 64] with dims [64, 192]"""
+    """Factorized 2D position embeddings matching HF structure.
+    Parameters have 3D shapes for broadcasting: (shape[axis], 1, dim) per axis."""
     def __init__(self, config):
         super().__init__()
         self.axial_pos_shape = config.axial_pos_shape  # e.g. [64, 64]
         self.axial_pos_embds_dim = config.axial_pos_embds_dim  # e.g. [64, 192]
         self.dropout = config.hidden_dropout_prob
 
-        # Create parameter lists for each axis
+        # Create parameter lists matching HF's 3D shape: (shape[axis], 1, dim) per axis
         self.weights = nn.ParameterList()
-        for axis_idx, (shape, dim) in enumerate(zip(self.axial_pos_shape, self.axial_pos_embds_dim)):
-            self.weights.append(nn.Parameter(torch.zeros(shape, dim)))
+        for axis_idx in range(len(self.axial_pos_shape)):
+            ax_shape = [1] * len(self.axial_pos_shape)
+            ax_shape[axis_idx] = self.axial_pos_shape[axis_idx]
+            ax_shape = tuple(ax_shape) + (self.axial_pos_embds_dim[axis_idx],)
+            self.weights.append(nn.Parameter(torch.ones(ax_shape, dtype=torch.float32)))
 
     def forward(self, position_ids):
         batch_size = position_ids.shape[0]
         seq_len = position_ids.shape[1]
 
-        # Compute full position embeddings from factored axial embeddings
-        full_position_embeddings = self._compute_axial_embeddings(seq_len, position_ids.device)
+        # Lazy broadcast: expand doesn't allocate memory
+        broadcasted_weights = [
+            weight.expand((batch_size,) + tuple(self.axial_pos_shape) + weight.shape[-1:])
+            for weight in self.weights
+        ]
 
-        # Take only the positions we need
-        position_embeddings = full_position_embeddings[:seq_len]
-        position_embeddings = position_embeddings.unsqueeze(0).expand(batch_size, -1, -1)
+        if not self.training:
+            # Eval mode: only materialize needed rows for memory efficiency (matches HF)
+            max_position_id = position_ids.max().item()
+            required_rows = -(-(max_position_id + 1) // self.axial_pos_shape[1])
 
-        # Apply dropout during training
-        if self.training and self.dropout > 0:
-            position_embeddings = F.dropout(position_embeddings, p=self.dropout, training=True)
+            # Slice to needed rows only along the first position axis
+            position_encodings = torch.cat(
+                [weight[:, :required_rows] for weight in broadcasted_weights], dim=-1
+            )
+            position_encodings = position_encodings.reshape(batch_size, -1, position_encodings.shape[-1])
 
-        return position_embeddings
+            # Select exact positions for each batch item
+            position_encodings = torch.cat(
+                [
+                    torch.index_select(position_encodings[i], 0, position_ids[i]).unsqueeze(0)
+                    for i in range(batch_size)
+                ],
+                dim=0,
+            )
+        else:
+            # Training mode: full position grid with dropout2d
+            full_len = 1
+            for s in self.axial_pos_shape:
+                full_len *= s
 
-    def _compute_axial_embeddings(self, seq_len, device):
-        # Outer product of axial embeddings
-        # weights[0]: [shape0, dim0], weights[1]: [shape1, dim1]
-        # Result: [shape0 * shape1, dim0 + dim1]
-        w0 = self.weights[0].to(device)  # [shape0, dim0]
-        w1 = self.weights[1].to(device)  # [shape1, dim1]
+            if self.dropout > 0:
+                weights = torch.cat(broadcasted_weights, dim=-1)
+                transposed_weights = weights.transpose(2, 1)
+                dropped_transposed_weights = F.dropout2d(
+                    transposed_weights, p=self.dropout, training=True
+                )
+                dropped_weights = dropped_transposed_weights.transpose(2, 1)
+                position_encodings = dropped_weights.reshape(batch_size, full_len, -1)
+            else:
+                position_encodings = torch.cat(
+                    [w.reshape(batch_size, full_len, -1) for w in broadcasted_weights],
+                    dim=-1,
+                )
+            position_encodings = position_encodings[:, :seq_len, :]
 
-        shape0, dim0 = w0.shape
-        shape1, dim1 = w1.shape
-
-        # Expand and concatenate: outer product along position dimensions
-        w0_expanded = w0.unsqueeze(1).expand(-1, shape1, -1).reshape(shape0 * shape1, dim0)
-        w1_expanded = w1.unsqueeze(0).expand(shape0, -1, -1).reshape(shape0 * shape1, dim1)
-
-        return torch.cat([w0_expanded, w1_expanded], dim=-1)
+        return position_encodings
 
 
 class ReformerEmbeddings(nn.Module):
@@ -90,11 +113,19 @@ class ReformerEmbeddings(nn.Module):
 
 
 class LSHSelfAttention(nn.Module):
-    """LSH Self-Attention with random rotations (torch.manual_seed(hash_seed)) and bucket sorting"""
+    """LSH Self-Attention matching HF's implementation:
+    - Hash RAW vectors (not normalized)
+    - Normalize only keys (not queries)
+    - Position-based self-mask (prevent self-attention)
+    - Causal mask for decoder
+    - Circular wrapping in _look_adjacent
+    - Logsumexp-weighted hash combination
+    """
     def __init__(self, config, layer_idx=None):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
+        self.is_decoder = getattr(config, 'is_decoder', False)
 
         self.num_attention_heads = config.num_attention_heads
         self.attention_head_size = config.attention_head_size
@@ -107,7 +138,8 @@ class LSHSelfAttention(nn.Module):
         self.num_chunks_before = getattr(config, "lsh_num_chunks_before", 1)
         self.num_chunks_after = getattr(config, "lsh_num_chunks_after", 0)
 
-        self.hash_seed = layer_idx  # Used for torch.manual_seed()
+        # Match HF: use config.hash_seed (default None)
+        self.hash_seed = getattr(config, 'hash_seed', None)
 
         # Shared Q/K projection
         self.query_key = nn.Linear(self.hidden_size, self.all_head_size, bias=False)
@@ -129,83 +161,120 @@ class LSHSelfAttention(nn.Module):
         value_vectors = self.value(hidden_states)
 
         query_key_vectors = query_key_vectors.view(bsz, seq_len, self.num_attention_heads, self.attention_head_size)
-        query_key_vectors = query_key_vectors.transpose(1, 2)
+        query_key_vectors = query_key_vectors.transpose(1, 2)  # (B, H, S, D)
         value_vectors = value_vectors.view(bsz, seq_len, self.num_attention_heads, self.attention_head_size)
-        value_vectors = value_vectors.transpose(1, 2)
+        value_vectors = value_vectors.transpose(1, 2)  # (B, H, S, D)
+
+        # #region agent log
+        import json as _json_lsh
+        _log_path_lsh = "/home/xiexinch/KernelBench/.cursor/debug.log"
+        _rng_cpu = torch.random.get_rng_state()[:8].tolist()
+        _rng_cuda = torch.cuda.get_rng_state()[:8].tolist() if torch.cuda.is_available() else []
+        with open(_log_path_lsh, "a") as _lf_lsh:
+            _lf_lsh.write(_json_lsh.dumps({"hypothesisId": "H-LSH-rng", "location": f"LSH.forward:layer{self.layer_idx}", "message": "rng_state_before_hash", "data": {"layer_idx": self.layer_idx, "rng_cpu_first8": _rng_cpu, "rng_cuda_first8": _rng_cuda, "qk_first3": query_key_vectors[0, 0, 0, :3].float().cpu().tolist(), "v_first3": value_vectors[0, 0, 0, :3].float().cpu().tolist(), "seq_len": seq_len}}) + "\n")
+        # #endregion
 
         # For short sequences, use standard attention
-        if seq_len <= self.chunk_length:
+        do_standard = seq_len <= self.chunk_length
+        if do_standard:
             return self._standard_attention(query_key_vectors, value_vectors, attention_mask, bsz, seq_len)
 
-        # Length-normalize query_key
-        query_key_vectors = self._len_and_dim_norm(query_key_vectors)
-
-        # Hash vectors with seeded random rotations
+        # Hash RAW (unnormalized) vectors - match HF
         if buckets is None:
             buckets = self._hash_vectors(query_key_vectors, num_hashes, attention_mask)
 
-        # Sort by buckets
-        _, sorted_indices = torch.sort(buckets, dim=-1, stable=True)
-        sorted_indices_expanded = sorted_indices.unsqueeze(-1).expand(-1, -1, -1, self.attention_head_size)
+        # #region agent log
+        with open(_log_path_lsh, "a") as _lf_lsh:
+            _lf_lsh.write(_json_lsh.dumps({"hypothesisId": "H-LSH-buckets", "location": f"LSH.forward:layer{self.layer_idx}", "message": "buckets_after_hash", "data": {"layer_idx": self.layer_idx, "buckets_shape": list(buckets.shape), "buckets_first10": buckets[0, 0, :10].cpu().tolist(), "buckets_unique": len(buckets[0, 0].unique().cpu().tolist())}}) + "\n")
+        # #endregion
 
-        # Expand for num_hashes
-        query_key_vectors = query_key_vectors.unsqueeze(2).expand(-1, -1, num_hashes, -1, -1)
-        query_key_vectors = query_key_vectors.reshape(bsz, self.num_attention_heads, -1, self.attention_head_size)
-        value_vectors_expanded = value_vectors.unsqueeze(2).expand(-1, -1, num_hashes, -1, -1)
-        value_vectors_expanded = value_vectors_expanded.reshape(bsz, self.num_attention_heads, -1, self.attention_head_size)
+        # Sort by buckets - get sorting indices
+        sorted_bucket_idx = self._stable_argsort(buckets)
+        # Position indices for tracking original positions (match HF: sorted_bucket_idx % seq_len)
+        sorted_bucket_idx_per_hash = sorted_bucket_idx % seq_len
 
-        sorted_qk = torch.gather(query_key_vectors, 2, sorted_indices_expanded)
-        sorted_v = torch.gather(value_vectors_expanded, 2, sorted_indices_expanded)
+        # Create undo sort indices
+        indices = torch.arange(sorted_bucket_idx.shape[-1], device=buckets.device).view(1, 1, -1).expand_as(sorted_bucket_idx)
+        undo_sorted_bucket_idx = sorted_bucket_idx.new_zeros(sorted_bucket_idx.shape)
+        undo_sorted_bucket_idx.scatter_(-1, sorted_bucket_idx, indices)
 
-        # Chunk sorted sequences
+        # Gather vectors by sorted position indices (match HF's _gather_by_expansion)
+        expanded_idx = sorted_bucket_idx_per_hash.unsqueeze(-1).expand(-1, -1, -1, self.attention_head_size)
+        qk_repeated = query_key_vectors.repeat(1, 1, num_hashes, 1)
+        v_repeated = value_vectors.repeat(1, 1, num_hashes, 1)
+        sorted_qk = torch.gather(qk_repeated, 2, expanded_idx)
+        sorted_v = torch.gather(v_repeated, 2, expanded_idx)
+
+        # Chunk into groups
         total_len = sorted_qk.shape[2]
         chunk_len = self.chunk_length
         num_chunks = total_len // chunk_len
 
         sorted_qk = sorted_qk.reshape(bsz, self.num_attention_heads, num_chunks, chunk_len, self.attention_head_size)
         sorted_v = sorted_v.reshape(bsz, self.num_attention_heads, num_chunks, chunk_len, self.attention_head_size)
-        sorted_buckets = torch.gather(buckets, 2, sorted_indices)
-        sorted_buckets = sorted_buckets.reshape(bsz, self.num_attention_heads, num_chunks, chunk_len)
 
-        # Look adjacent chunks
-        sorted_qk_adj = self._look_adjacent(sorted_qk, self.num_chunks_before, self.num_chunks_after)
-        sorted_v_adj = self._look_adjacent(sorted_v, self.num_chunks_before, self.num_chunks_after)
-        sorted_buckets_adj = self._look_adjacent(sorted_buckets, self.num_chunks_before, self.num_chunks_after)
-
-        # Compute attention
+        # Normalize ONLY keys, queries stay raw (match HF)
+        key_vectors = self._len_and_dim_norm(sorted_qk)
         query_vectors = sorted_qk
-        key_vectors = sorted_qk_adj
 
+        # Look adjacent with circular wrapping (match HF)
+        key_vectors = self._look_adjacent(key_vectors, self.num_chunks_before, self.num_chunks_after)
+        sorted_v = self._look_adjacent(sorted_v, self.num_chunks_before, self.num_chunks_after)
+
+        # Compute attention scores
         attn_weights = torch.matmul(query_vectors, key_vectors.transpose(-1, -2))
 
-        # FIX: dtype-aware self-mask handling for precision alignment
-        query_bucket_idx = sorted_buckets.unsqueeze(-1)
-        key_bucket_idx = sorted_buckets_adj.unsqueeze(-2)
-        self_mask = query_bucket_idx != key_bucket_idx
-        if hidden_states.dtype == torch.float16:
-            self_mask_value = self.self_mask_value_float16.to(hidden_states.device).to(dtype=hidden_states.dtype)
+        # Position-based indices for masking (match HF)
+        query_bucket_idx = sorted_bucket_idx_per_hash.reshape(bsz, self.num_attention_heads, num_chunks, chunk_len)
+        key_value_bucket_idx = self._look_adjacent(query_bucket_idx, self.num_chunks_before, self.num_chunks_after)
+
+        # Get correct mask values depending on precision
+        if attn_weights.dtype == torch.float16:
+            self_mask_value = self.self_mask_value_float16.half()
+            mask_value = self.mask_value_float16.half()
         else:
-            self_mask_value = self.self_mask_value_float32.to(hidden_states.device).to(dtype=hidden_states.dtype)
-        attn_weights = attn_weights.masked_fill(self_mask, self_mask_value)
+            self_mask_value = self.self_mask_value_float32
+            mask_value = self.mask_value_float32
 
-        # FIX: dtype-aware softmax with stable logsumexp for precision alignment
+        # Causal + attention mask (match HF's _compute_attn_mask)
+        mask = self._compute_attn_mask(
+            query_bucket_idx, key_value_bucket_idx, attention_mask,
+            attn_weights.shape, do_standard_self_attention=False
+        )
+        if mask is not None:
+            attn_weights = torch.where(mask, attn_weights, mask_value)
+
+        # Self-mask: prevent token from attending to itself (POSITION-based, match HF)
+        self_mask = torch.ne(query_bucket_idx.unsqueeze(-1), key_value_bucket_idx.unsqueeze(-2)).to(
+            query_bucket_idx.device
+        )
+        attn_weights = torch.where(self_mask, attn_weights, self_mask_value)
+
+        # Softmax via logsumexp
         logits = torch.logsumexp(attn_weights, dim=-1, keepdim=True)
-        attn_weights = torch.exp(attn_weights - logits)
-        attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
+        attn_probs = torch.exp(attn_weights - logits)
+        attn_probs = F.dropout(attn_probs, p=self.dropout, training=self.training)
 
-        attn_output = torch.matmul(attn_weights, sorted_v_adj)
+        # Attend values
+        attn_output = torch.matmul(attn_probs, sorted_v)
 
-        # Merge chunks back
-        attn_output = attn_output.reshape(bsz, self.num_attention_heads, -1, self.attention_head_size)
+        # Merge chunks: flatten chunk dims
+        logits = logits.flatten(start_dim=2, end_dim=3).squeeze(-1)  # (B, H, num_hashes * S)
+        attn_output = attn_output.flatten(start_dim=2, end_dim=3)  # (B, H, num_hashes * S, D)
 
         # Unsort back to original order
-        rev_sorted_indices = torch.argsort(sorted_indices, dim=-1)
-        rev_sorted_indices_expanded = rev_sorted_indices.unsqueeze(-1).expand(-1, -1, -1, self.attention_head_size)
-        attn_output = torch.gather(attn_output, 2, rev_sorted_indices_expanded)
+        undo_expanded = undo_sorted_bucket_idx.unsqueeze(-1).expand(-1, -1, -1, self.attention_head_size)
+        attn_output = torch.gather(attn_output, 2, undo_expanded)
+        logits = torch.gather(logits, 2, undo_sorted_bucket_idx)
 
-        # Average over hashes
-        attn_output = attn_output.reshape(bsz, self.num_attention_heads, num_hashes, seq_len, self.attention_head_size)
-        attn_output = attn_output.mean(dim=2)
+        # Combine hashes with logsumexp weighting (match HF, not simple mean)
+        if num_hashes > 1:
+            attn_output = attn_output.reshape(bsz, self.num_attention_heads, num_hashes, seq_len, self.attention_head_size)
+            logits = logits.reshape(bsz, self.num_attention_heads, num_hashes, seq_len).unsqueeze(-1)
+            probs_vectors = torch.exp(logits - torch.logsumexp(logits, dim=2, keepdim=True))
+            attn_output = torch.sum(attn_output * probs_vectors, dim=2)
+        else:
+            attn_output = attn_output.reshape(bsz, self.num_attention_heads, seq_len, self.attention_head_size)
 
         # Merge heads
         attn_output = attn_output.transpose(1, 2).reshape(bsz, seq_len, self.all_head_size).contiguous()
@@ -213,32 +282,70 @@ class LSHSelfAttention(nn.Module):
         return LSHSelfAttentionOutput(hidden_states=attn_output, attention_probs=None, buckets=buckets)
 
     def _standard_attention(self, query_key_vectors, value_vectors, attention_mask, bsz, seq_len):
-        """Standard attention for short sequences."""
-        attn_weights = torch.matmul(query_key_vectors, query_key_vectors.transpose(-1, -2))
-        attn_weights = attn_weights / math.sqrt(self.attention_head_size)
-
-        # FIX: dtype-aware causal mask for precision alignment
-        causal_mask = torch.triu(
-            torch.ones(seq_len, seq_len, dtype=torch.bool, device=query_key_vectors.device), diagonal=1
+        """Standard attention for short sequences (matches HF)."""
+        # In standard mode, use position indices directly
+        sorted_bucket_idx_per_hash = torch.arange(seq_len, device=query_key_vectors.device).repeat(
+            bsz, self.num_attention_heads, 1
         )
-        if query_key_vectors.dtype == torch.float16:
-            mask_val = torch.tensor(-1e4, device=query_key_vectors.device, dtype=query_key_vectors.dtype)
+        # Normalize only keys
+        key_vectors = self._len_and_dim_norm(query_key_vectors)
+        # Queries stay raw
+        attn_weights = torch.matmul(query_key_vectors, key_vectors.transpose(-1, -2))
+
+        # Mask values
+        if attn_weights.dtype == torch.float16:
+            self_mask_value = self.self_mask_value_float16.half()
+            mask_value = self.mask_value_float16.half()
         else:
-            mask_val = torch.tensor(-1e9, device=query_key_vectors.device, dtype=query_key_vectors.dtype)
-        attn_weights = attn_weights.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0), mask_val)
+            self_mask_value = self.self_mask_value_float32
+            mask_value = self.mask_value_float32
 
-        # FIX: dtype-aware softmax with stable logsumexp for precision alignment
+        # Causal + attention mask
+        mask = self._compute_attn_mask(
+            sorted_bucket_idx_per_hash, sorted_bucket_idx_per_hash, attention_mask,
+            attn_weights.shape, do_standard_self_attention=True
+        )
+        if mask is not None:
+            attn_weights = torch.where(mask, attn_weights, mask_value)
+
+        # Self-mask
+        self_mask = torch.ne(
+            sorted_bucket_idx_per_hash.unsqueeze(-1),
+            sorted_bucket_idx_per_hash.unsqueeze(-2)
+        ).to(query_key_vectors.device)
+        attn_weights = torch.where(self_mask, attn_weights, self_mask_value)
+
         logits = torch.logsumexp(attn_weights, dim=-1, keepdim=True)
-        attn_weights = torch.exp(attn_weights - logits)
-        attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
+        attn_probs = torch.exp(attn_weights - logits)
+        attn_probs = F.dropout(attn_probs, p=self.dropout, training=self.training)
 
-        attn_output = torch.matmul(attn_weights, value_vectors)
+        attn_output = torch.matmul(attn_probs, value_vectors)
         attn_output = attn_output.transpose(1, 2).reshape(bsz, seq_len, self.all_head_size).contiguous()
 
         return LSHSelfAttentionOutput(hidden_states=attn_output, attention_probs=None, buckets=None)
 
+    def _compute_attn_mask(self, query_indices, key_indices, attention_mask, query_key_dot_shape, do_standard_self_attention):
+        """Compute attention mask including causal mask (matches HF)."""
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(torch.bool)[:, None, :]
+            if not do_standard_self_attention:
+                attention_mask = attention_mask[:, None, :]
+                attention_mask = attention_mask.expand(query_indices.shape[:-1] + (-1,))
+                attention_mask = torch.gather(attention_mask, -1, key_indices)
+            attention_mask = attention_mask.unsqueeze(-2).expand(query_key_dot_shape)
+
+        # Causal mask for decoder
+        if self.is_decoder:
+            causal_mask = torch.ge(query_indices.unsqueeze(-1), key_indices.unsqueeze(-2)).to(query_indices.device)
+            if attention_mask is not None:
+                attention_mask = causal_mask * attention_mask
+            else:
+                attention_mask = causal_mask
+
+        return attention_mask
+
     def _hash_vectors(self, vectors, num_hashes, attention_mask):
-        """Hash vectors using random rotations with torch.manual_seed(hash_seed)"""
+        """Hash vectors using random rotations (matches HF)."""
         batch_size = vectors.shape[0]
 
         if isinstance(self.num_buckets, int):
@@ -252,7 +359,7 @@ class LSHSelfAttention(nn.Module):
 
         vectors = vectors.detach()
 
-        # Seed random generator for reproducible rotations
+        # Match HF: only seed if hash_seed is not None
         if self.hash_seed is not None:
             torch.manual_seed(self.hash_seed)
 
@@ -294,29 +401,24 @@ class LSHSelfAttention(nn.Module):
         return norm_x
 
     @staticmethod
+    def _stable_argsort(vector):
+        """Stable argsort matching HF's implementation."""
+        scale_offset = torch.arange(vector.shape[-1], device=vector.device).view(1, 1, -1).expand_as(vector)
+        scaled_vector = vector.shape[-1] * vector + (scale_offset % vector.shape[-1])
+        return scaled_vector.argsort(dim=-1)
+
+    @staticmethod
     def _look_adjacent(x, num_chunks_before, num_chunks_after):
+        """Circular wrapping adjacent chunk lookup (matches HF)."""
         if num_chunks_before == 0 and num_chunks_after == 0:
             return x
-        chunks = []
-        if num_chunks_before > 0:
-            chunks.append(x[:, :, :-1])  # All but last
-        chunks.append(x)
-        if num_chunks_after > 0:
-            chunks.append(x[:, :, 1:])  # All but first
-        # Need to handle properly by padding
-        # Actually the adjacent lookup concatenates along the token dimension within each chunk
-        adjacent_chunks = []
-        num_chunks = x.shape[2]
-        for chunk_idx in range(num_chunks):
-            parts = []
-            for offset in range(-num_chunks_before, num_chunks_after + 1):
-                adj_idx = chunk_idx + offset
-                if 0 <= adj_idx < num_chunks:
-                    parts.append(x[:, :, adj_idx])
-                else:
-                    parts.append(torch.zeros_like(x[:, :, 0]))
-            adjacent_chunks.append(torch.cat(parts, dim=-2))
-        return torch.stack(adjacent_chunks, dim=2)
+        slices = []
+        for i in range(-num_chunks_before, num_chunks_after + 1):
+            if i == 0:
+                slices.append(x)
+            else:
+                slices.append(torch.cat([x[:, :, i:, ...], x[:, :, :i, ...]], dim=2))
+        return torch.cat(slices, dim=3)
 
 
 class LocalSelfAttention(nn.Module):
@@ -327,6 +429,7 @@ class LocalSelfAttention(nn.Module):
         self.attention_head_size = config.attention_head_size
         self.all_head_size = self.num_attention_heads * self.attention_head_size
         self.hidden_size = config.hidden_size
+        self.is_decoder = getattr(config, 'is_decoder', False)
 
         self.chunk_length = config.local_attn_chunk_length
         self.num_chunks_before = config.local_num_chunks_before
@@ -341,6 +444,19 @@ class LocalSelfAttention(nn.Module):
         self.mask_value_float16 = torch.tensor(-1e4)
         self.mask_value_float32 = torch.tensor(-1e9)
 
+    @staticmethod
+    def _look_adjacent(x, num_chunks_before, num_chunks_after):
+        """Circular wrapping adjacent chunk lookup (matches HF)."""
+        if num_chunks_before == 0 and num_chunks_after == 0:
+            return x
+        slices = []
+        for i in range(-num_chunks_before, num_chunks_after + 1):
+            if i == 0:
+                slices.append(x)
+            else:
+                slices.append(torch.cat([x[:, :, i:, ...], x[:, :, :i, ...]], dim=2))
+        return torch.cat(slices, dim=3)
+
     def forward(self, hidden_states, attention_mask=None, output_attentions=False):
         bsz, seq_len, _ = hidden_states.shape
 
@@ -352,8 +468,11 @@ class LocalSelfAttention(nn.Module):
         key_vectors = key_vectors.view(bsz, seq_len, self.num_attention_heads, self.attention_head_size).transpose(1, 2)
         value_vectors = value_vectors.view(bsz, seq_len, self.num_attention_heads, self.attention_head_size).transpose(1, 2)
 
-        # Key normalization: scale keys K/sqrt(head_dim) instead of queries
+        # Key normalization: scale keys K/sqrt(head_dim) instead of queries (matches HF)
         key_vectors = key_vectors / math.sqrt(self.attention_head_size)
+
+        # Absolute position indices for masking (matches HF)
+        indices = torch.arange(seq_len, device=hidden_states.device).repeat(bsz, self.num_attention_heads, 1)
 
         do_standard = seq_len <= self.chunk_length
 
@@ -363,39 +482,30 @@ class LocalSelfAttention(nn.Module):
             key_vectors = key_vectors.reshape(bsz, self.num_attention_heads, num_chunks, self.chunk_length, self.attention_head_size)
             value_vectors = value_vectors.reshape(bsz, self.num_attention_heads, num_chunks, self.chunk_length, self.attention_head_size)
 
+            # Chunk indices for masking
+            query_indices = indices.reshape(bsz, self.num_attention_heads, num_chunks, self.chunk_length)
+            key_indices = indices.reshape(bsz, self.num_attention_heads, num_chunks, self.chunk_length)
+
+            # Look adjacent for keys, values, and key_indices (circular wrapping)
             key_vectors = self._look_adjacent(key_vectors, self.num_chunks_before, self.num_chunks_after)
             value_vectors = self._look_adjacent(value_vectors, self.num_chunks_before, self.num_chunks_after)
+            key_indices = self._look_adjacent(key_indices, self.num_chunks_before, self.num_chunks_after)
+        else:
+            query_indices = key_indices = indices
 
         attn_weights = torch.matmul(query_vectors, key_vectors.transpose(-1, -2))
 
-        # FIX: dtype-aware causal mask handling for precision alignment
-        if not do_standard:
-            # Create chunk-local causal mask
-            q_len = self.chunk_length
-            k_len = key_vectors.shape[-2]
-            # For each chunk, queries can only attend to keys with lower or equal position
-            q_indices = torch.arange(q_len, device=hidden_states.device)
-            k_indices_parts = []
-            for offset in range(-self.num_chunks_before, self.num_chunks_after + 1):
-                k_indices_parts.append(torch.arange(self.chunk_length, device=hidden_states.device) + (offset * self.chunk_length))
-            k_indices = torch.cat(k_indices_parts)
-            causal_mask = q_indices.unsqueeze(1) < k_indices.unsqueeze(0)
-            if hidden_states.dtype == torch.float16:
-                mask_val = self.mask_value_float16.to(hidden_states.device).to(dtype=hidden_states.dtype)
-            else:
-                mask_val = self.mask_value_float32.to(hidden_states.device).to(dtype=hidden_states.dtype)
-            attn_weights = attn_weights.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0).unsqueeze(0), mask_val)
-        else:
-            causal_mask = torch.triu(
-                torch.ones(seq_len, seq_len, dtype=torch.bool, device=hidden_states.device), diagonal=1
-            )
-            if hidden_states.dtype == torch.float16:
-                mask_val = self.mask_value_float16.to(hidden_states.device).to(dtype=hidden_states.dtype)
-            else:
-                mask_val = self.mask_value_float32.to(hidden_states.device).to(dtype=hidden_states.dtype)
-            attn_weights = attn_weights.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0), mask_val)
+        # Compute attention mask using HF's _compute_attn_mask approach
+        mask = self._compute_attn_mask(query_indices, key_indices, attention_mask, attn_weights.shape, do_standard)
 
-        # Use logsumexp-based softmax for numerical stability
+        if mask is not None:
+            if attn_weights.dtype == torch.float16:
+                mask_val = self.mask_value_float16.to(hidden_states.device).half()
+            else:
+                mask_val = self.mask_value_float32.to(hidden_states.device)
+            attn_weights = torch.where(mask, attn_weights, mask_val)
+
+        # Use logsumexp-based softmax for numerical stability (matches HF)
         logits = torch.logsumexp(attn_weights, dim=-1, keepdim=True)
         attn_probs = torch.exp(attn_weights - logits)
         attn_probs = F.dropout(attn_probs, p=self.dropout, training=self.training)
@@ -403,35 +513,48 @@ class LocalSelfAttention(nn.Module):
         attn_output = torch.matmul(attn_probs, value_vectors)
 
         if not do_standard:
-            attn_output = attn_output.reshape(bsz, self.num_attention_heads, seq_len, self.attention_head_size)
+            attn_output = attn_output.flatten(start_dim=2, end_dim=3)
 
         attn_output = attn_output.transpose(1, 2).reshape(bsz, seq_len, self.all_head_size).contiguous()
 
         return LocalSelfAttentionOutput(hidden_states=attn_output, attention_probs=None)
 
-    @staticmethod
-    def _look_adjacent(x, num_chunks_before, num_chunks_after):
-        if num_chunks_before == 0 and num_chunks_after == 0:
-            return x
-        num_chunks = x.shape[2]
-        adjacent_chunks = []
-        for chunk_idx in range(num_chunks):
-            parts = []
-            for offset in range(-num_chunks_before, num_chunks_after + 1):
-                adj_idx = chunk_idx + offset
-                if 0 <= adj_idx < num_chunks:
-                    parts.append(x[:, :, adj_idx])
-                else:
-                    parts.append(torch.zeros_like(x[:, :, 0]))
-            adjacent_chunks.append(torch.cat(parts, dim=-2))
-        return torch.stack(adjacent_chunks, dim=2)
+    def _compute_attn_mask(self, query_indices, key_indices, attention_mask, query_key_dots_shape, do_standard):
+        """Compute attention mask including causal mask (matches HF LocalSelfAttention._compute_attn_mask)."""
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(torch.bool)[:, None, :]
+            if not do_standard:
+                attention_mask = attention_mask.reshape(attention_mask.shape[0], 1, -1, self.chunk_length)
+                attention_mask = self._look_adjacent(attention_mask, self.num_chunks_before, self.num_chunks_after)
+            attention_mask = attention_mask.unsqueeze(-2).expand(query_key_dots_shape)
+
+        # Causal mask for decoder (matches HF: only when is_decoder=True)
+        if self.is_decoder is True:
+            causal_mask = torch.ge(query_indices.unsqueeze(-1), key_indices.unsqueeze(-2)).to(query_indices.device)
+            if attention_mask is not None:
+                attention_mask = causal_mask * attention_mask
+            else:
+                attention_mask = causal_mask
+
+        return attention_mask
+
+
+class ReformerSelfOutput(nn.Module):
+    """Wrapper for attention output linear (matches HF key: attention.output.dense.weight)."""
+    def __init__(self, config):
+        super().__init__()
+        all_head_size = config.num_attention_heads * config.attention_head_size
+        self.dense = nn.Linear(all_head_size, config.hidden_size, bias=False)
+
+    def forward(self, hidden_states):
+        return self.dense(hidden_states)
 
 
 class ReformerAttention(nn.Module):
     def __init__(self, config, layer_idx=0):
         super().__init__()
         self.layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.output = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
+        self.output = ReformerSelfOutput(config)
 
         attn_type = config.attn_layers[layer_idx]
         if attn_type == "lsh":
@@ -449,19 +572,40 @@ class ReformerAttention(nn.Module):
         return attn_outputs._replace(hidden_states=attn_output)
 
 
+class ReformerFeedForwardDense(nn.Module):
+    """Wrapper for FF input linear (matches HF key: feed_forward.dense.dense.weight)."""
+    def __init__(self, config):
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, config.feed_forward_size)
+
+    def forward(self, hidden_states):
+        return self.dense(hidden_states)
+
+
+class ReformerFeedForwardOutput(nn.Module):
+    """Wrapper for FF output linear (matches HF key: feed_forward.output.dense.weight)."""
+    def __init__(self, config):
+        super().__init__()
+        self.dense = nn.Linear(config.feed_forward_size, config.hidden_size)
+
+    def forward(self, hidden_states):
+        return self.dense(hidden_states)
+
+
 class ChunkReformerFeedForward(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.dense = nn.Linear(config.hidden_size, config.feed_forward_size)
-        self.output = nn.Linear(config.feed_forward_size, config.hidden_size)
+        self.dense = ReformerFeedForwardDense(config)
+        self.output = ReformerFeedForwardOutput(config)
         self.dropout = config.hidden_dropout_prob
 
     def forward(self, hidden_states):
         hidden_states = self.layer_norm(hidden_states)
+        # Match HF: linear → dropout → activation (config.hidden_act defaults to "relu")
         hidden_states = self.dense(hidden_states)
-        hidden_states = F.gelu(hidden_states)
         hidden_states = F.dropout(hidden_states, p=self.dropout, training=self.training)
+        hidden_states = F.relu(hidden_states)
         hidden_states = self.output(hidden_states)
         hidden_states = F.dropout(hidden_states, p=self.dropout, training=self.training)
         return hidden_states
@@ -590,20 +734,31 @@ class ReformerModel(nn.Module):
         return encoder_output
 
 
+class ReformerOnlyLMHead(nn.Module):
+    """LM head matching HF structure: lm_head.decoder.weight, lm_head.bias.
+    HF does NOT use bias in forward (decoder has bias=False, self.bias exists but is unused)."""
+    def __init__(self, config):
+        super().__init__()
+        self.decoder = nn.Linear(2 * config.hidden_size, config.vocab_size, bias=False)
+        self.bias = nn.Parameter(torch.zeros(config.vocab_size))
+
+    def forward(self, hidden_states):
+        return self.decoder(hidden_states)
+
+
 class ReformerModelWithLMHead(nn.Module):
-    """ReformerOnlyLMHead: nn.Linear(2*hidden_size, vocab_size) - takes concatenated RevNet output"""
+    """Reformer with LM head (matches HF ReformerModelWithLMHead structure)."""
     def __init__(self, config):
         super().__init__()
         self.config = config
         config.is_decoder = True
         self.reformer = ReformerModel(config)
         # LM head: 2*hidden_size -> vocab_size (RevNet output is concatenated)
-        self.lm_head_decoder = nn.Linear(2 * config.hidden_size, config.vocab_size, bias=False)
-        self.lm_head_bias = nn.Parameter(torch.zeros(config.vocab_size))
+        self.lm_head = ReformerOnlyLMHead(config)
 
     def forward(self, input_ids, attention_mask=None):
         hidden_states = self.reformer(input_ids, attention_mask=attention_mask)
-        logits = self.lm_head_decoder(hidden_states) + self.lm_head_bias
+        logits = self.lm_head(hidden_states)
         return logits
 
 

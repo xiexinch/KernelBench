@@ -616,12 +616,14 @@ class BigBirdPredictionHeadTransform(nn.Module):
 
 
 class BigBirdLMPredictionHead(nn.Module):
-    """MLM prediction head: transform → decoder."""
+    """MLM prediction head: transform → decoder (with tied bias)."""
 
     def __init__(self, config):
         super().__init__()
         self.transform = BigBirdPredictionHeadTransform(config)
         self.decoder = nn.Linear(config.hidden_size, config.vocab_size, bias=True)
+        # Separate bias parameter tied to decoder.bias (matches HF structure)
+        self.bias = self.decoder.bias
 
     def forward(self, hidden_states):
         hidden_states = self.transform(hidden_states)
@@ -629,16 +631,28 @@ class BigBirdLMPredictionHead(nn.Module):
         return hidden_states
 
 
-class BigBirdForMaskedLM(nn.Module):
-    """BigBird for Masked Language Modeling with weight tying."""
+class BigBirdOnlyMLMHead(nn.Module):
+    """Wrapper matching HF's cls.predictions structure."""
+
+    def __init__(self, config):
+        super().__init__()
+        self.predictions = BigBirdLMPredictionHead(config)
+
+    def forward(self, hidden_states):
+        return self.predictions(hidden_states)
+
+
+class BigBirdForCausalLM(nn.Module):
+    """BigBird for Causal Language Modeling (matches HF BigBirdForCausalLM structure)."""
 
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.bert = BigBirdModel(config)
-        self.cls = BigBirdLMPredictionHead(config)
-        # Weight tying: share embedding weights with output layer
-        self.cls.decoder.weight = self.bert.embeddings.word_embeddings.weight
+        self.cls = BigBirdOnlyMLMHead(config)
+        # Weight tying: only share weights when config says so
+        if getattr(config, 'tie_word_embeddings', True):
+            self.cls.predictions.decoder.weight = self.bert.embeddings.word_embeddings.weight
 
     def forward(self, input_ids, attention_mask=None, token_type_ids=None):
         sequence_output = self.bert(input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)
@@ -655,7 +669,7 @@ class Model(torch.nn.Module):
     def __init__(self, config):
         super().__init__()
         # Initialize model with static config (no weight loading)
-        self.model = BigBirdForMaskedLM(config)
+        self.model = BigBirdForCausalLM(config)
 
     def forward(self, x):
         # Forward pass: input_ids -> prediction scores
