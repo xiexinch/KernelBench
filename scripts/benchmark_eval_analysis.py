@@ -1,9 +1,29 @@
 import json, os
+from typing import Optional, Union
 
 import pydra
 from pydra import Config, REQUIRED
 from kernelbench.dataset import construct_kernelbench_dataset
 from tabulate import tabulate
+
+
+def _resolve_level_spec(level_spec: Union[int, str]) -> tuple[int, Optional[str], str]:
+    """
+    Resolve a level spec to (dataset_level, local_subdir, level_key).
+
+    - int 1-4: dataset_level=N, local_subdir=None, level_key="level{N}"
+    - "level4_expand": dataset_level=4, local_subdir="level4_expand", level_key="level4_expand"
+    """
+    if isinstance(level_spec, int):
+        return level_spec, None, f"level{level_spec}"
+    s = str(level_spec).strip().lower()
+    if s == "level4_expand":
+        return 4, "level4_expand", "level4_expand"
+    try:
+        n = int(s)
+        return n, None, f"level{n}"
+    except ValueError:
+        raise ValueError(f"Unknown level spec: {level_spec}. Use 1-4 or 'level4_expand'.")
 
 """
 Benchmark Eval Analysis
@@ -73,10 +93,16 @@ def analyze_greedy_eval(
     """
     Analyze the greedy eval results for a run of a particular level.
 
+    level: int (1-4) or str "level4_expand".
+
     Returns a dict with all computed metrics.
     """
-
-    dataset = construct_kernelbench_dataset(level)
+    dataset_level, local_subdir, level_key = _resolve_level_spec(level)
+    dataset = construct_kernelbench_dataset(
+        level=dataset_level,
+        source="local",
+        local_subdir=local_subdir,
+    )
 
     # Resolve eval results path (use override if provided)
     if eval_results_dir:
@@ -182,11 +208,14 @@ def analyze_greedy_eval(
         problem = dataset.get_problem_by_id(pid)
         problem_name = problem.name
 
-        if problem_name not in baseline_results[f"level{level}"]:
+        if level_key not in baseline_results:
+            print(f"Warning: Level key {level_key} not found in baseline results")
+            continue
+        if problem_name not in baseline_results[level_key]:
             print(f"Warning: Problem {problem_name} not found in baseline results")
             continue
 
-        baseline_entry = baseline_results[f"level{level}"][problem_name]
+        baseline_entry = baseline_results[level_key][problem_name]
         if baseline_entry is None:
             print(f"Warning: Baseline entry for {problem_name} is None")
             continue
@@ -250,7 +279,7 @@ def analyze_greedy_eval(
     # Build and return results dict
     results = {
         "run_name": run_name,
-        "level": level,
+        "level": level_key,
         "hardware": hardware,
         "total_count": total_count,
         "total_eval": total_eval,

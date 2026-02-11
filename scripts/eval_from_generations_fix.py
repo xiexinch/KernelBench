@@ -14,7 +14,6 @@ import time
 from dataclasses import dataclass
 
 from collections import defaultdict
-from dataclasses import dataclass
 
 import numpy as np
 import pydra
@@ -275,13 +274,14 @@ def fetch_ref_arch_from_problem_id(
 
 
 def fetch_kernel_from_disk(
-    run_dir: str, level: int, problem_id: int, sample_id: int
+    run_dir: str, level_label: str, problem_id: int, sample_id: int
 ) -> str | None:
     """
-    Fetch kernel file from disk (stored in runs/{run_name})
+    Fetch kernel file from disk (stored in runs/{run_name}).
+    level_label: e.g. "1", "4", or "level4_expand" for file naming.
     """
     kernel_path = os.path.join(
-        run_dir, f"level_{level}_problem_{problem_id}_sample_{sample_id}_kernel.py"
+        run_dir, f"level_{level_label}_problem_{problem_id}_sample_{sample_id}_kernel.py"
     )
 
     if os.path.exists(kernel_path):
@@ -308,7 +308,7 @@ def evaluate_single_sample(
 
     # fetch kernel from disk
     # Add database support in the future
-    kernel_src = fetch_kernel_from_disk(run_dir, configs.level, problem_id, sample_id)
+    kernel_src = fetch_kernel_from_disk(run_dir, configs.level_label, problem_id, sample_id)
 
     if kernel_src is None:
         print(f"[WARNING] Kernel not found for problem {problem_id} sample {sample_id}, skipping")
@@ -476,7 +476,7 @@ def batch_eval_modal(
                     ref_arch_src = fetch_ref_arch_from_problem_id(
                         curr_level_dataset, problem_id, config.dataset_src
                     )
-                    kernel_src = fetch_kernel_from_disk(run_dir, config.level, problem_id, sample_id)
+                    kernel_src = fetch_kernel_from_disk(run_dir, config.level_label, problem_id, sample_id)
                     
                     if kernel_src is None:
                         print(f"[WARNING] Kernel not found for problem {problem_id} sample {sample_id}")
@@ -844,11 +844,29 @@ def main(config: EvalConfig):
     if mp.get_start_method(allow_none=True) is None:
         mp.set_start_method("spawn")
 
+    # Resolve level / level4_expand variant for dataset and file naming
+    level_raw = config.level
+    if isinstance(level_raw, str) and level_raw.strip().lower() == "level4_expand":
+        dataset_level = 4
+        local_subdir = "level4_expand"
+        level_label = "level4_expand"
+        if config.dataset_src != "local":
+            raise ValueError(
+                "level4_expand is only supported with dataset_src=local"
+            )
+    else:
+        dataset_level = int(level_raw)
+        local_subdir = None
+        level_label = str(dataset_level)
+
+    config.level_label = level_label
+
     # Dataset Configurations - Unified loading
     dataset = construct_kernelbench_dataset(
-        level=config.level,
+        level=dataset_level,
         source=config.dataset_src,
         dataset_name=config.dataset_name,
+        local_subdir=local_subdir,
     )
 
     all_problem_ids = dataset.get_problem_ids()
@@ -866,7 +884,7 @@ def main(config: EvalConfig):
             print(f"Warning: No problems found in subset range {config.subset}")
 
     print(
-        f"Evaluating {config.num_samples_per_problem} sample(s) each for level {config.level} problems: {problem_ids_to_run}"
+        f"Evaluating {config.num_samples_per_problem} sample(s) each for level {config.level_label} problems: {problem_ids_to_run}"
     )
 
     run_dir = os.path.join(config.runs_dir, config.run_name)
@@ -886,7 +904,7 @@ def main(config: EvalConfig):
                 already_evaluated += 1
                 continue
             # Skip if kernel file does not exist
-            if fetch_kernel_from_disk(run_dir, config.level, problem_id, sample_id) is None:
+            if fetch_kernel_from_disk(run_dir, config.level_label, problem_id, sample_id) is None:
                 kernel_missing += 1
                 continue
             total_work.append((problem_id, sample_id))
