@@ -1,8 +1,10 @@
 """Verify numerical precision between official HuggingFace models and pure PyTorch implementations.
 
-Uses RANDOM INITIALIZATION only (no from_pretrained/weight download) to validate:
-1. state_dict key/order/shape compatibility with official Transformers
-2. Numerical precision alignment (logits, hidden states) with identical random inputs
+Supports two modes:
+  --mode random      (default) Random init, no weight download. Validates state_dict
+                     compatibility and numerical precision with identical random weights.
+  --mode pretrained  Loads real pretrained weights from HuggingFace. Validates that the
+                     refactored model produces identical outputs with production weights.
 """
 
 import gc
@@ -57,14 +59,18 @@ def _get_hf_model_class(model_type):
     return (AutoModelForCausalLM, None)
 
 
-def _build_config_from_pretrained(model_name, model_type):
-    """Build config from pretrained (config only, no weights) for random init."""
+def _build_config_from_pretrained(model_name, model_type, mode="random"):
+    """Build config from pretrained (config only, no weights).
+    In 'random' mode, disables tie_word_embeddings so weight copy works correctly.
+    In 'pretrained' mode, keeps the original config as-is.
+    """
     from transformers import AutoConfig
 
     hf_config = AutoConfig.from_pretrained(model_name)
-    # GPT-Neo 与 ref 均使用 tie_word_embeddings，保持一致以便权重复制正确
-    if model_type != "gpt_neo":
-        hf_config.tie_word_embeddings = False
+    if mode == "random":
+        # GPT-Neo 与 ref 均使用 tie_word_embeddings，保持一致以便权重复制正确
+        if model_type != "gpt_neo":
+            hf_config.tie_word_embeddings = False
     # Force eager attention to match refactored manual attention (SDPA has different numerical behavior)
     if hasattr(hf_config, '_attn_implementation'):
         hf_config._attn_implementation = "eager"
@@ -209,10 +215,15 @@ def _compare_state_dicts(hf_sd, ref_sd, ref_prefix="model.", allow_extra_in_hf=F
     return len(mismatches) == 0, mismatches
 
 
-def verify_file(file_num, model_name, batch_size, sequence_length, model_type, base_threshold=THRESHOLD):
-    """Verify precision for a single benchmark file using random init."""
+def verify_file(file_num, model_name, batch_size, sequence_length, model_type, base_threshold=THRESHOLD, mode="random"):
+    """Verify precision for a single benchmark file.
+    mode='random': both models use random init, weights copied from HF to refactored.
+    mode='pretrained': HF model loaded via from_pretrained, weights copied to refactored.
+    """
     print(f"\n{'='*60}")
     print(f"File {file_num}: {model_name} (bs={batch_size}, seq={sequence_length})")
+    if mode == "pretrained":
+        print(f"  [PRETRAINED] loading real weights from HuggingFace")
     if model_type == "opt":
         print("  [OPT] using lm_head key mapping (model.lm_head.xxx <-> lm_head.xxx)")
     if model_type == "bart" and file_num in FILE_THRESHOLD_OVERRIDE:
@@ -252,13 +263,19 @@ def verify_file(file_num, model_name, batch_size, sequence_length, model_type, b
         spec.loader.exec_module(refactored_module)
 
         # Build config from pretrained (config only, no weights)
-        hf_config = _build_config_from_pretrained(model_name, model_type)
+        hf_config = _build_config_from_pretrained(model_name, model_type, mode=mode)
 
-        # Create OFFICIAL HF model with random init (no from_pretrained)
-        # Use eager attention to match refactored manual attention implementation
-        # Force float32 to avoid dtype mismatch (some models default to float16)
+        # Create OFFICIAL HF model
         from transformers import AutoModelForCausalLM
-        original_model = AutoModelForCausalLM.from_config(hf_config, attn_implementation="eager")
+        if mode == "pretrained":
+            # Load real pretrained weights from HuggingFace
+            original_model = AutoModelForCausalLM.from_pretrained(
+                model_name, config=hf_config, attn_implementation="eager"
+            )
+        else:
+            # Random init (no from_pretrained)
+            original_model = AutoModelForCausalLM.from_config(hf_config, attn_implementation="eager")
+        # Force float32 to avoid dtype mismatch (some models default to float16)
         original_model = original_model.float()
         original_model.eval()
 
@@ -387,7 +404,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Verify precision of refactored models (random init, no download)"
+        description="Verify precision of refactored models against HuggingFace"
     )
     parser.add_argument(
         "--files",
@@ -402,13 +419,24 @@ def main():
         default=THRESHOLD,
         help=f"Maximum absolute error threshold (default: {THRESHOLD})",
     )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["random", "pretrained"],
+        default="random",
+        help="Initialization mode: 'random' (default) uses random weights; "
+             "'pretrained' loads real weights from HuggingFace",
+    )
     args = parser.parse_args()
 
     threshold = args.threshold
+    mode = args.mode
     files_to_verify = args.files or [f[0] for f in FILES]
 
-    print("Precision Verification Report (Random Init - No Weight Download)")
+    mode_label = "Random Init - No Weight Download" if mode == "random" else "Pretrained Weights"
+    print(f"Precision Verification Report ({mode_label})")
     print(f"Script version: {VERIFY_SCRIPT_VERSION}")
+    print(f"Mode: {mode}")
     print(f"Threshold: {threshold} (BART files 6,17,20 use {FILE_THRESHOLD_OVERRIDE.get(6, threshold):.0e})")
     print(f"Files: {files_to_verify}")
     print(f"Device: {DEVICE}")
@@ -419,7 +447,7 @@ def main():
         model_type = entry[4] if len(entry) > 4 else "auto"
         if file_num not in files_to_verify:
             continue
-        result = verify_file(file_num, model_name, bs, seq, model_type, base_threshold=threshold)
+        result = verify_file(file_num, model_name, bs, seq, model_type, base_threshold=threshold, mode=mode)
         results.append(result)
 
         # 每个文件完成后显式回收，避免大模型累积导致 OOM
