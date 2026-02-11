@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 from litellm import completion
 from dotenv import load_dotenv
@@ -8,6 +9,10 @@ load_dotenv()
 
 RUNS_ROOT = "runs"
 OUTPUT_ROOT = "cuda_eval_code"
+KERNEL_BENCH_PATH = os.path.join(
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
+    "KernelBench",
+)
 LEVEL_PROBLEMS = {
     1: range(1, 101),
     2: range(1, 101),
@@ -25,6 +30,62 @@ def parse_args():
     parser.add_argument("--run_name", type=str, required=True)
     parser.add_argument("--level", type=str, required=True)
     return parser.parse_args()
+
+
+def _level_to_subdir(level: str) -> str:
+    """将 level 参数映射为 KernelBench 子目录名。"""
+    if level == "4_expand":
+        return "level4_expand"
+    return f"level{int(level)}"
+
+
+def load_eval_results(run_name: str) -> dict:
+    """加载 run 目录下的 eval_results.json，不存在或解析失败则返回空 dict。"""
+    path = os.path.join(RUNS_ROOT, run_name, "eval_results.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return {}
+
+
+def get_eval_entry_for_sample(eval_results: dict, problem_id: int, sample_id: int = 0) -> dict | None:
+    """
+    从 eval_results 中取出指定 problem_id、sample_id 的条目。
+    支持 list 格式 [{"sample_id": 0, "compiled": ..., "correctness": ...}, ...]
+    与旧版 dict 格式 {"sample_id": 0, "compiled": ..., "correctness": ...}。
+    不存在则返回 None。
+    """
+    key = str(problem_id)
+    if key not in eval_results:
+        return None
+    entry = eval_results[key]
+    if isinstance(entry, list):
+        for r in entry:
+            if r.get("sample_id") == sample_id:
+                return r
+        return None
+    if entry.get("sample_id") == sample_id:
+        return entry
+    return None
+
+
+def get_problem_name(level: str, problem_id: int) -> str | None:
+    """
+    从 KernelBench 对应 level 目录下根据 problem_id 查找问题文件名（不含扩展名），
+    作为目录名使用，例如 1_Square_matrix_multiplication_。
+    """
+    subdir = _level_to_subdir(level)
+    problem_dir = os.path.join(KERNEL_BENCH_PATH, subdir)
+    if not os.path.isdir(problem_dir):
+        return None
+    prefix = f"{problem_id}_"
+    for name in os.listdir(problem_dir):
+        if name.endswith(".py") and name.startswith(prefix):
+            return os.path.splitext(name)[0]
+    return None
 
 
 def extract_kernel_code(
@@ -141,33 +202,83 @@ def main():
     run_name = args.run_name
     level = args.level
     sample_id = 0
+
+    level_key = level if level == "4_expand" else int(level)
+    if level_key not in LEVEL_PROBLEMS:
+        raise ValueError(f"不支持的 level: {level}，可选: 1, 2, 3, 4, 4_expand")
+
+    eval_results = load_eval_results(run_name)
+    if not eval_results:
+        print(f"Warning: 未找到或无法解析 runs/{run_name}/eval_results.json，将不进行任何转换。")
+
     output_dir = os.path.join(OUTPUT_ROOT, run_name, f"level_{level}")
     os.makedirs(output_dir, exist_ok=True)
-    for problem_id in LEVEL_PROBLEMS[level]:
+
+    summary = {
+        "success": [],
+        "compile_failed": [],
+        "output_error": [],
+        "no_eval_result": [],
+        "kernel_missing": [],
+        "conversion_failed": [],
+    }
+
+    for problem_id in LEVEL_PROBLEMS[level_key]:
+        entry = get_eval_entry_for_sample(eval_results, problem_id, sample_id)
+        problem_name = get_problem_name(level, problem_id)
+        display_name = problem_name if problem_name else f"problem_{problem_id}"
+
+        if entry is None:
+            summary["no_eval_result"].append(display_name)
+            continue
+        if not entry.get("compiled", False):
+            summary["compile_failed"].append(display_name)
+            continue
+        if not entry.get("correctness", False):
+            summary["output_error"].append(display_name)
+            continue
+
         macro_code, kernel_code, entry_code = extract_kernel_code(
             run_name, level, problem_id, sample_id
         )
         if kernel_code is None or entry_code is None:
+            summary["kernel_missing"].append(display_name)
             continue
+
         prompt = make_prompt(macro_code, kernel_code, entry_code)
-        response = completion(
-            model=MODEL_NAME,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=1024,
-            temperature=0.0,
-            api_key=ANTHROPIC_API_KEY,
-        )
-        eval_code = response.choices[0].message.content
+        try:
+            response = completion(
+                model=MODEL_NAME,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=1024,
+                temperature=0.0,
+                api_key=ANTHROPIC_API_KEY,
+            )
+            eval_code = response.choices[0].message.content
+        except Exception as e:
+            print(f"Warning: 调用模型失败 problem_id={problem_id}, error={e}")
+            summary["conversion_failed"].append(display_name)
+            continue
+
         if not eval_code.startswith("```cpp"):
             print(
                 f"Warning: Generated eval code does not valid c++ code, skipping problem {problem_id}"
             )
+            summary["conversion_failed"].append(display_name)
             continue
         eval_code = eval_code.replace("```cpp", "").replace("```", "").strip()
-        output_dir_problem = os.path.join(output_dir, f"problem_{problem_id}")
+
+        dir_name = problem_name if problem_name else f"problem_{problem_id}"
+        output_dir_problem = os.path.join(output_dir, dir_name)
         os.makedirs(output_dir_problem, exist_ok=True)
-        with open(os.path.join(output_dir_problem, f"tmp_ori.cu"), "w") as f:
+        with open(os.path.join(output_dir_problem, "tmp_ori.cu"), "w", encoding="utf-8") as f:
             f.write(eval_code)
+        summary["success"].append(display_name)
+
+    summary_path = os.path.join(output_dir, "conversion_summary.json")
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+    print(f"转换总结已写入: {summary_path}")
 
 
 if __name__ == "__main__":
