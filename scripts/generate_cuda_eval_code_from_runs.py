@@ -12,6 +12,8 @@ LEVEL_PROBLEMS = {
     1: range(1, 101),
     2: range(1, 101),
     3: range(1, 51),
+    4: range(1, 21),
+    "4_expand": range(1, 21),
 }
 
 MODEL_NAME = "anthropic/claude-sonnet-4-5-20250929"
@@ -21,12 +23,12 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--run_name", type=str, required=True)
-    parser.add_argument("--level", type=int, required=True)
+    parser.add_argument("--level", type=str, required=True)
     return parser.parse_args()
 
 
 def extract_kernel_code(
-    run_name: str, level: int, problem_id: int, sample_id: int = 0
+    run_name: str, level: str, problem_id: int, sample_id: int = 0
 ) -> str:
     kernel_path = os.path.join(
         RUNS_ROOT,
@@ -80,7 +82,8 @@ def extract_kernel_code(
 
 
 # one-shot template for generate c++ entry code
-one_shot_template = Template("""You are a CUDA expert. Your task is to generate a c++ entry code for the given kernel code and torch::Tensor entry code. You should follow the following rules:
+one_shot_template = Template(
+    """You are a CUDA expert. Your task is to generate a c++ entry code for the given kernel code and torch::Tensor entry code. You should follow the following rules:
 - You should use the original kernel code and torch::Tensor entry code as a reference.
 - You should generate the entry code that is compatible with the torch::Tensor entry code.
 - You should write the entry code with the original kernel code
@@ -122,7 +125,8 @@ void test_tmp_kernel_ori(
     leaky_relu_kernel_ori<<<num_blocks, block_size>>>(input, output,negative_slope, size);
 }
 ```
-""")
+"""
+)
 
 
 def make_prompt(macro_code: str, kernel_code: str, entry_code: str) -> str:
@@ -155,7 +159,9 @@ def main():
         )
         eval_code = response.choices[0].message.content
         if not eval_code.startswith("```cpp"):
-            print(f"Warning: Generated eval code does not valid c++ code, skipping problem {problem_id}")
+            print(
+                f"Warning: Generated eval code does not valid c++ code, skipping problem {problem_id}"
+            )
             continue
         eval_code = eval_code.replace("```cpp", "").replace("```", "").strip()
         output_dir_problem = os.path.join(output_dir, f"problem_{problem_id}")
