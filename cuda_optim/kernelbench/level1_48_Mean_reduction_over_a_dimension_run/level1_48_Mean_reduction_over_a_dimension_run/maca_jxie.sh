@@ -1,0 +1,25 @@
+
+export MACA_PATH=/opt/maca-2.29.0.6/
+#export MACA_PATH=/sw_home/zhlu/c500_driver/20250210/opt/maca-20250210.343/
+#export MACA_PATH=/sw_home/zhlu/c500_driver/2.27.0.5/opt/maca-2.27.0.5/
+#export MACA_PATH=/sw_home/zhlu/c500_driver/1018/opt/maca-20241018.173
+#export MACA_PATH=/sw_home/zhlu/c500_driver/0921/opt/maca-20240921-139
+#export MACA_PATH=/sw_home/zhlu/c500_driver/0913/opt/maca-20240913-127
+#export MACA_PATH=/sw_home/zhlu/c500_driver/2.26.0.8/opt/maca-2.26.0.8/
+#export MACA_PATH=/sw_home/zhlu/c500_driver/1114/opt/maca-20241114.220
+#export MACA_PATH=/sw_home/zhlu/c500_driver/0821/opt/maca-20240821-90/
+#export MACA_PATH=/remote_home/zhlu/c500_driver/latest/opt/opt/maca-20240704-1051/
+#export MACA_PATH=/remote_home/zhlu/c500_driver/0618/
+#export MACA_PATH=/remote_home/zhlu/c500_driver/0528/opt/maca-20240528-988/
+# export MACA_PATH=/remote_home/zhlu/c500_driver/0417/opt/maca-20240417-932/
+# export MACA_PATH=/home/zhlu/c500_driver/1130/opt/maca-20231129-633
+# export MACA_PATH=/home/zhlu/c500_driver/1207/opt/maca-20231207-652
+# export MACA_PATH=/home/zhlu/c500_driver/20240102717/opt/maca-20240102-717
+# export MACA_PATH=/home/zhlu/c500_driver/maca-20230904-401
+# export MACA_PATH=/opt/maca-20230928-471
+#export MACA_PATH=/home/zhlu/c500_driver/maca-20230904-401
+# export MACA_PATH=/home/zhlu/c500_driver/opt/maca-20230917-445
+# export MACA_PATH=/opt/maca-20231030-558
+export MACA_CLANG_PATH=${MACA_PATH}/mxgpu_llvm/bin
+export PATH=${MACA_PATH}/bin:${MACA_CLANG_PATH}:${PATH}
+export LD_LIBRARY_PATH=${MACA_PATH}/lib:${MACA_PATH}/mxgpu_llvm/lib/:${LD_LIBRARY_PATH}
