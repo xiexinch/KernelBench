@@ -165,15 +165,6 @@ class LSHSelfAttention(nn.Module):
         value_vectors = value_vectors.view(bsz, seq_len, self.num_attention_heads, self.attention_head_size)
         value_vectors = value_vectors.transpose(1, 2)  # (B, H, S, D)
 
-        # #region agent log
-        import json as _json_lsh
-        _log_path_lsh = "/home/xiexinch/KernelBench/.cursor/debug.log"
-        _rng_cpu = torch.random.get_rng_state()[:8].tolist()
-        _rng_cuda = torch.cuda.get_rng_state()[:8].tolist() if torch.cuda.is_available() else []
-        with open(_log_path_lsh, "a") as _lf_lsh:
-            _lf_lsh.write(_json_lsh.dumps({"hypothesisId": "H-LSH-rng", "location": f"LSH.forward:layer{self.layer_idx}", "message": "rng_state_before_hash", "data": {"layer_idx": self.layer_idx, "rng_cpu_first8": _rng_cpu, "rng_cuda_first8": _rng_cuda, "qk_first3": query_key_vectors[0, 0, 0, :3].float().cpu().tolist(), "v_first3": value_vectors[0, 0, 0, :3].float().cpu().tolist(), "seq_len": seq_len}}) + "\n")
-        # #endregion
-
         # For short sequences, use standard attention
         do_standard = seq_len <= self.chunk_length
         if do_standard:
@@ -182,11 +173,6 @@ class LSHSelfAttention(nn.Module):
         # Hash RAW (unnormalized) vectors - match HF
         if buckets is None:
             buckets = self._hash_vectors(query_key_vectors, num_hashes, attention_mask)
-
-        # #region agent log
-        with open(_log_path_lsh, "a") as _lf_lsh:
-            _lf_lsh.write(_json_lsh.dumps({"hypothesisId": "H-LSH-buckets", "location": f"LSH.forward:layer{self.layer_idx}", "message": "buckets_after_hash", "data": {"layer_idx": self.layer_idx, "buckets_shape": list(buckets.shape), "buckets_first10": buckets[0, 0, :10].cpu().tolist(), "buckets_unique": len(buckets[0, 0].unique().cpu().tolist())}}) + "\n")
-        # #endregion
 
         # Sort by buckets - get sorting indices
         sorted_bucket_idx = self._stable_argsort(buckets)

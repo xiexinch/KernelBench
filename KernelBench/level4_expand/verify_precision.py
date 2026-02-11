@@ -299,36 +299,10 @@ def verify_file(file_num, model_name, batch_size, sequence_length, model_type, b
                 if candidate in ref_sd:
                     return candidate
             return None
-        # #region agent log
-        import json as _json
-        _log_path = "/home/xiexinch/KernelBench/.cursor/debug.log"
-        _copied_keys = []
-        _failed_keys = []
-        # #endregion
         for hf_key, hf_val in hf_sd.items():
             ref_key = resolve_ref_key_for_copy(hf_key)
             if ref_key is not None and ref_key in ref_sd and ref_sd[ref_key].shape == hf_val.shape:
                 ref_sd[ref_key].copy_(hf_val)
-                # #region agent log
-                _copied_keys.append({"hf": hf_key, "ref": ref_key})
-                # #endregion
-            else:
-                # #region agent log
-                _failed_keys.append({"hf": hf_key, "ref": ref_key, "reason": "not_found_or_shape_mismatch"})
-                # #endregion
-        # #region agent log
-        # Check weight sharing (tied weights)
-        _sharing_info = {}
-        _ref_sd_after = refactored_model.state_dict()
-        _all_ref_keys = sorted(_ref_sd_after.keys())
-        for _k1_idx, _k1 in enumerate(_all_ref_keys):
-            for _k2 in _all_ref_keys[_k1_idx+1:]:
-                if _ref_sd_after[_k1].data_ptr() == _ref_sd_after[_k2].data_ptr():
-                    _sharing_info[f"{_k1}=={_k2}"] = True
-        _attn_impl = getattr(getattr(original_model, 'config', None), '_attn_implementation', 'unknown')
-        with open(_log_path, "a") as _lf:
-            _lf.write(_json.dumps({"hypothesisId": "H1-H8", "location": "verify_precision.py:weight_copy", "message": "weight_copy_result", "data": {"file_num": file_num, "model_name": model_name, "model_type": model_type, "copied_count": len(_copied_keys), "failed_count": len(_failed_keys), "total_hf_keys": len(hf_sd), "total_ref_keys": len(ref_sd), "failed_keys": _failed_keys[:20], "sharing_info": _sharing_info, "hf_model_class": type(original_model).__name__, "ref_model_class": type(refactored_model).__name__, "attn_implementation": _attn_impl}}) + "\n")
-        # #endregion
         refactored_model.load_state_dict(ref_sd, strict=False)
 
         # 释放 state_dict 以降低内存峰值（大模型下可节省数 GB）
@@ -351,11 +325,6 @@ def verify_file(file_num, model_name, batch_size, sequence_length, model_type, b
                 0, vocab_size, (batch_size, sequence_length), device=device
             )
 
-            # #region agent log - hooks disabled for full run
-            _hf_hooks = []
-            _ref_hooks = []
-            # #endregion
-
             with torch.no_grad():
                 # Save RNG state so both models use same random state (needed for LSH hashing)
                 _cpu_rng = torch.random.get_rng_state()
@@ -374,24 +343,11 @@ def verify_file(file_num, model_name, batch_size, sequence_length, model_type, b
                 if isinstance(refactored_logits, tuple):
                     refactored_logits = refactored_logits[0]
 
-            # #region agent log - cleanup hooks
-            for _h in _hf_hooks:
-                _h.remove()
-            for _h in _ref_hooks:
-                _h.remove()
-            # #endregion
-
             max_error = torch.max(
                 torch.abs(original_logits.float() - refactored_logits.float())
             ).item()
             max_errors.append(max_error)
             print(f"  Trial {trial + 1}: max abs error = {max_error:.2e}")
-
-            # #region agent log
-            if trial == 0 and max_error > THRESHOLD:
-                with open(_log_path, "a") as _lf:
-                    _lf.write(_json.dumps({"hypothesisId": "H9-debug", "location": "verify_precision.py:forward", "message": "logits_comparison", "data": {"file_num": file_num, "model_type": model_type, "orig_logits_shape": list(original_logits.shape), "ref_logits_shape": list(refactored_logits.shape), "orig_first5": original_logits[0, 0, :5].float().cpu().tolist(), "ref_first5": refactored_logits[0, 0, :5].float().cpu().tolist(), "orig_mean": original_logits.float().mean().item(), "ref_mean": refactored_logits.float().mean().item(), "orig_std": original_logits.float().std().item(), "ref_std": refactored_logits.float().std().item()}}) + "\n")
-            # #endregion
 
         avg_error = sum(max_errors) / len(max_errors)
         worst_error = max(max_errors)
