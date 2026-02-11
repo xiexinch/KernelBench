@@ -133,7 +133,7 @@ def generate_sample_single(
     if config.log_prompt:
         prompt_path = os.path.join(
             run_dir,
-            f"level_{config.level}_problem_{work.problem_id}_sample_{work.sample_id}_prompt.txt",
+            f"level_{config.level_label}_problem_{work.problem_id}_sample_{work.sample_id}_prompt.txt",
         )
         with open(prompt_path, "w") as f:
             f.write(custom_prompt)
@@ -165,7 +165,7 @@ def generate_sample_single(
     # Store to local file
     kernel_path = os.path.join(
         run_dir,
-        f"level_{config.level}_problem_{work.problem_id}_sample_{work.sample_id}_kernel.py",
+        f"level_{config.level_label}_problem_{work.problem_id}_sample_{work.sample_id}_kernel.py",
     )
     with open(kernel_path, "w") as f:
         f.write(custom_kernel)
@@ -188,13 +188,14 @@ def generate_sample_launcher(
 
 
 def check_kernel_exists(
-    run_dir: str, level: int, problem_id: int, sample_id: int
+    run_dir: str, level_label: str, problem_id: int, sample_id: int
 ) -> bool:
     """
-    Check if a kernel for a given problem and sample ID already exists in the run directory
+    Check if a kernel for a given problem and sample ID already exists in the run directory.
+    level_label: e.g. "1", "4", or "level4_expand" for file naming.
     """
     kernel_path = os.path.join(
-        run_dir, f"level_{level}_problem_{problem_id}_sample_{sample_id}_kernel.py"
+        run_dir, f"level_{level_label}_problem_{problem_id}_sample_{sample_id}_kernel.py"
     )
     return os.path.exists(kernel_path)
 
@@ -260,11 +261,30 @@ def main(config: GenerationConfig):
 
     print(f"Starting Batch Generation with config: {config}")
 
+    # Resolve level / level4_expand variant for dataset and file naming
+    level_raw = config.level
+    if isinstance(level_raw, str) and level_raw.strip().lower() == "level4_expand":
+        dataset_level = 4
+        local_subdir = "level4_expand"
+        level_label = "level4_expand"
+        if config.dataset_src != "local":
+            raise ValueError(
+                "level4_expand is only supported with dataset_src=local"
+            )
+    else:
+        dataset_level = int(level_raw)
+        local_subdir = None
+        level_label = str(dataset_level)
+
+    # Store level_label for file paths (used in generate_sample_single, check_kernel_exists)
+    config.level_label = level_label
+
     # Dataset Configurations - Unified loading
     dataset = construct_kernelbench_dataset(
-        level=config.level,
+        level=dataset_level,
         source=config.dataset_src,
         dataset_name=config.dataset_name,
+        local_subdir=local_subdir,
     )
 
     all_problem_ids = dataset.get_problem_ids()
@@ -278,7 +298,7 @@ def main(config: GenerationConfig):
             print(f"Warning: No problems found in subset range {config.subset}")
 
     print(
-        f"Generating {config.num_samples} sample(s) each for level {config.level} problems: {problem_ids_to_run}"
+        f"Generating {config.num_samples} sample(s) each for level {config.level_label} problems: {problem_ids_to_run}"
     )
 
     # set up run directory
@@ -300,7 +320,7 @@ def main(config: GenerationConfig):
     for problem_id in problem_ids_to_run:
         for sample_id in range(config.num_samples):
             total_problems += 1
-            if not check_kernel_exists(run_dir, config.level, problem_id, sample_id):
+            if not check_kernel_exists(run_dir, config.level_label, problem_id, sample_id):
                 problems_to_run.append(
                     WorkArgs(problem_id=int(problem_id), sample_id=sample_id)
                 )

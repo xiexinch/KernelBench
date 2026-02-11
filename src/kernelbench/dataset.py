@@ -192,6 +192,7 @@ class LocalKernelBenchDataset(BaseDataset):
         base_path: str = KERNEL_BENCH_PATH,
         problem_ids: Optional[list[int]] = None,
         id_range: Optional[tuple[int, int]] = None,
+        local_subdir: Optional[str] = None,
     ):
         """Initialize local dataset.
 
@@ -200,12 +201,15 @@ class LocalKernelBenchDataset(BaseDataset):
             base_path: Path to KernelBench directory
             problem_ids: Optional list of specific problem IDs to include
             id_range: Optional (start_id, end_id) inclusive range
+            local_subdir: Optional subdirectory name (e.g. "level4_expand").
+                When set, loads from base_path/local_subdir instead of base_path/level{N}.
         """
         if level < 1:
             raise ValueError(f"level must be >= 1, got {level}")
 
         self._level = level
         self._base_path = base_path
+        self._local_subdir = local_subdir
         self._problems: dict[int, Problem] = {}
 
         # Build filter set from problem_ids and/or id_range
@@ -234,7 +238,8 @@ class LocalKernelBenchDataset(BaseDataset):
         return self._level
 
     def _load_problems(self):
-        problem_dir = os.path.join(self._base_path, f"level{self._level}")
+        subdir = self._local_subdir if self._local_subdir else f"level{self._level}"
+        problem_dir = os.path.join(self._base_path, subdir)
 
         if not os.path.exists(problem_dir):
             raise FileNotFoundError(f"Problem directory not found: {problem_dir}")
@@ -293,6 +298,7 @@ class LocalKernelBenchDataset(BaseDataset):
             base_path=self._base_path,
             problem_ids=problem_ids,
             id_range=id_range,
+            local_subdir=self._local_subdir,
         )
 
 
@@ -417,6 +423,7 @@ def construct_kernelbench_dataset(
     base_path: str = KERNEL_BENCH_PATH,
     problem_ids: Optional[list[int]] = None,
     id_range: Optional[tuple[int, int]] = None,
+    local_subdir: Optional[str] = None,
 ) -> BaseDataset:
     """Construct a KernelBench dataset for a specific level.
 
@@ -427,6 +434,8 @@ def construct_kernelbench_dataset(
         base_path: Path to KernelBench directory (if source="local")
         problem_ids: Optional list of specific problem IDs to include
         id_range: Optional (start_id, end_id) inclusive range
+        local_subdir: Optional subdirectory name for local source only (e.g. "level4_expand").
+            When set, loads from base_path/local_subdir instead of base_path/level{N}.
 
     Returns:
         BaseDataset instance for the specified level
@@ -460,7 +469,9 @@ def construct_kernelbench_dataset(
         'import torch...'
     """
     if source == "local":
-        return LocalKernelBenchDataset(level, base_path, problem_ids, id_range)
+        return LocalKernelBenchDataset(
+            level, base_path, problem_ids, id_range, local_subdir
+        )
     elif source == "huggingface":
         return HuggingFaceKernelBenchDataset(level, dataset_name, problem_ids, id_range)
     else:

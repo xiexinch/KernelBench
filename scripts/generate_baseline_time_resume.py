@@ -15,7 +15,8 @@ import numpy as np
 import multiprocessing as mp
 import threading
 from queue import Queue, Empty
-from typing import Optional
+from typing import Optional, Union
+
 from kernelbench.dataset import (
     construct_kernelbench_dataset,
     fetch_ref_arch_from_dataset,
@@ -35,6 +36,27 @@ REPO_TOP_PATH = os.path.abspath(
 KERNEL_BENCH_PATH = os.path.join(REPO_TOP_PATH, "KernelBench")
 
 TIMING_DIR = os.path.join(REPO_TOP_PATH, "results", "timing")
+
+
+def _resolve_level_spec(
+    level_spec: Union[int, str],
+) -> tuple[str, int, Optional[str]]:
+    """
+    Resolve a level spec to (level_key, dataset_level, local_subdir).
+
+    - int 1-4: level_key="level{N}", dataset_level=N, local_subdir=None
+    - "level4_expand": level_key="level4_expand", dataset_level=4, local_subdir="level4_expand"
+    """
+    if isinstance(level_spec, int):
+        return f"level{level_spec}", level_spec, None
+    s = str(level_spec).strip().lower()
+    if s == "level4_expand":
+        return "level4_expand", 4, "level4_expand"
+    try:
+        n = int(s)
+        return f"level{n}", n, None
+    except ValueError:
+        raise ValueError(f"Unknown level spec: {level_spec}. Use 1-4 or 'level4_expand'.")
 
 
 def _is_valid_baseline_result(result) -> bool:
@@ -138,14 +160,15 @@ def record_baseline_times_resume(
     precision: str = "fp32",
     num_gpus: int = 1,
     timeout: int = 0,
-    levels: Optional[list[int]] = None,
+    levels: Optional[list[Union[int, str]]] = None,
 ):
     """
     Generate baseline time for KernelBench with resume support.
     Loads existing results, skips problems with valid results, only measures failed/missing.
     When num_gpus > 1, runs measurements in parallel across GPUs (batch size = num_gpus).
     When timeout > 0, each operator measurement is limited to timeout seconds; hung process is terminated.
-    When levels is specified, only measure those levels (e.g., [1, 2, 4]); default is [1, 2, 3, 4].
+    When levels is specified, only measure those levels (e.g., [1, 2, 4] or [1, 2, "level4_expand"]);
+    default is [1, 2, 3, 4].
     """
     if levels is None:
         levels = [1, 2, 3, 4]
@@ -167,12 +190,16 @@ def record_baseline_times_resume(
         precision,
     )
 
-    for level in levels:
-        level_key = f"level{level}"
+    for level_spec in levels:
+        level_key, dataset_level, local_subdir = _resolve_level_spec(level_spec)
         if level_key not in json_results:
             json_results[level_key] = {}
 
-        dataset = construct_kernelbench_dataset(level)
+        dataset = construct_kernelbench_dataset(
+            level=dataset_level,
+            source="local",
+            local_subdir=local_subdir,
+        )
         problem_ids = dataset.get_problem_ids()
 
         total = len(problem_ids)
@@ -215,7 +242,7 @@ def record_baseline_times_resume(
 
             for i in tqdm(
                 range(0, len(work_items), num_gpus),
-                desc=f"Level {level}",
+                desc=f"Level {level_key}",
                 total=(len(work_items) + num_gpus - 1) // num_gpus,
             ):
                 batch_indices = list(range(i, min(i + num_gpus, len(work_items))))
@@ -233,7 +260,7 @@ def record_baseline_times_resume(
                     json.dump(json_results, f, indent=4)
         elif num_gpus <= 1:
             device = torch.device("cuda:0")
-            for ref_arch_name, ref_arch_src in tqdm(to_measure, desc=f"Level {level}"):
+            for ref_arch_name, ref_arch_src in tqdm(to_measure, desc=f"Level {level_key}"):
                 runtime_stats = measure_ref_program_time(
                     ref_arch_name=ref_arch_name,
                     ref_arch_src=ref_arch_src,
@@ -253,7 +280,7 @@ def record_baseline_times_resume(
             with ctx.Pool(num_gpus) as pool:
                 for i in tqdm(
                     range(0, len(work_items), num_gpus),
-                    desc=f"Level {level}",
+                    desc=f"Level {level_key}",
                     total=(len(work_items) + num_gpus - 1) // num_gpus,
                 ):
                     batch = work_items[i : i + num_gpus]
@@ -325,10 +352,10 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--levels",
-        type=int,
+        type=str,
         nargs="+",
         default=None,
-        help="KernelBench levels to measure (e.g., --levels 1 2 4). Default: 1 2 3 4.",
+        help="KernelBench levels to measure (e.g., --levels 1 2 4 or --levels 1 2 level4_expand). Default: 1 2 3 4.",
     )
     args = parser.parse_args()
 
@@ -336,7 +363,17 @@ if __name__ == "__main__":
     num_gpus = args.num_gpus
     precision = args.precision
     timeout = max(0, args.timeout)
-    levels = args.levels
+    # Parse levels: normalize to int or str (e.g. "level4_expand")
+    raw_levels = args.levels
+    if raw_levels is not None:
+        levels = []
+        for x in raw_levels:
+            try:
+                levels.append(int(x))
+            except ValueError:
+                levels.append(x)
+    else:
+        levels = None
 
     if torch.cuda.is_available():
         n_dev = torch.cuda.device_count()
