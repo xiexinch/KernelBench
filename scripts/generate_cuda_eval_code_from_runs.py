@@ -4,6 +4,7 @@ import os
 from litellm import completion
 from dotenv import load_dotenv
 from string import Template
+from tqdm import tqdm
 
 load_dotenv()
 
@@ -223,7 +224,14 @@ def main():
         "conversion_failed": [],
     }
 
-    for problem_id in LEVEL_PROBLEMS[level_key]:
+    total = len(LEVEL_PROBLEMS[level_key])
+    for problem_id in tqdm(
+        LEVEL_PROBLEMS[level_key],
+        total=total,
+        desc="生成 CUDA 评估代码",
+        unit="题",
+        ncols=80,
+    ):
         entry = get_eval_entry_for_sample(eval_results, problem_id, sample_id)
         problem_name = get_problem_name(level, problem_id)
         display_name = problem_name if problem_name else f"problem_{problem_id}"
