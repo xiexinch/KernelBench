@@ -52,7 +52,9 @@ def load_eval_results(run_name: str) -> dict:
         return {}
 
 
-def get_eval_entry_for_sample(eval_results: dict, problem_id: int, sample_id: int = 0) -> dict | None:
+def get_eval_entry_for_sample(
+    eval_results: dict, problem_id: int, sample_id: int = 0
+) -> dict | None:
     """
     从 eval_results 中取出指定 problem_id、sample_id 的条目。
     支持 list 格式 [{"sample_id": 0, "compiled": ..., "correctness": ...}, ...]
@@ -210,7 +212,9 @@ def main():
 
     eval_results = load_eval_results(run_name)
     if not eval_results:
-        print(f"Warning: 未找到或无法解析 runs/{run_name}/eval_results.json，将不进行任何转换。")
+        print(
+            f"Warning: 未找到或无法解析 runs/{run_name}/eval_results.json，将不进行任何转换。"
+        )
 
     output_dir = os.path.join(OUTPUT_ROOT, run_name, f"level_{level}")
     os.makedirs(output_dir, exist_ok=True)
@@ -258,7 +262,7 @@ def main():
             response = completion(
                 model=MODEL_NAME,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=1024,
+                max_tokens=32768,
                 temperature=0.0,
                 api_key=ANTHROPIC_API_KEY,
             )
@@ -279,7 +283,9 @@ def main():
         dir_name = problem_name if problem_name else f"problem_{problem_id}"
         output_dir_problem = os.path.join(output_dir, dir_name)
         os.makedirs(output_dir_problem, exist_ok=True)
-        with open(os.path.join(output_dir_problem, "tmp_ori.cu"), "w", encoding="utf-8") as f:
+        with open(
+            os.path.join(output_dir_problem, "tmp_ori.cu"), "w", encoding="utf-8"
+        ) as f:
             f.write(eval_code)
         summary["success"].append(display_name)
 
