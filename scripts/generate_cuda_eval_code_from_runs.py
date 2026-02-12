@@ -29,8 +29,14 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--run_name", type=str, required=True)
-    parser.add_argument("--level", type=str, required=True)
-    return parser.parse_args()
+    parser.add_argument("--level", type=str, default=None,
+                        help="处理的 level（未指定 --failed_results 时必填）")
+    parser.add_argument("--failed_results", type=str, default=None,
+                        help="batch_test_results.txt 路径，仅重新生成其中的失败任务")
+    args = parser.parse_args()
+    if args.failed_results is None and args.level is None:
+        parser.error("未指定 --failed_results 时必须提供 --level")
+    return args
 
 
 def _level_to_subdir(level: str) -> str:
@@ -200,21 +206,51 @@ def make_prompt(macro_code: str, kernel_code: str, entry_code: str) -> str:
     return one_shot_prompt
 
 
-def main():
-    args = parse_args()
-    run_name = args.run_name
-    level = args.level
-    sample_id = 0
+def parse_failed_tasks(results_path: str) -> dict[str, list[int]]:
+    """
+    解析 batch_test_results.txt，提取失败任务的 (level, problem_id)。
 
-    level_key = level if level == "4_expand" else int(level)
-    if level_key not in LEVEL_PROBLEMS:
-        raise ValueError(f"不支持的 level: {level}，可选: 1, 2, 3, 4, 4_expand")
+    返回: {level_str: [problem_id, ...]}，例如 {"1": [23, 26], "2": [10, 16]}
+    """
+    import re
+    failed: dict[str, list[int]] = {}
+    with open(results_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if "COMPILE_ERROR" in line or "RUNTIME_ERROR" in line or "TIMEOUT" in line:
+                m = re.match(r"^level(\d+)_(\d+)_", line)
+                if m:
+                    level_str = m.group(1)
+                    problem_id = int(m.group(2))
+                    failed.setdefault(level_str, [])
+                    if problem_id not in failed[level_str]:
+                        failed[level_str].append(problem_id)
+    for level_str in failed:
+        failed[level_str].sort()
+    return failed
 
-    eval_results = load_eval_results(run_name)
-    if not eval_results:
-        print(
-            f"Warning: 未找到或无法解析 runs/{run_name}/eval_results.json，将不进行任何转换。"
-        )
+
+def generate_for_problems(
+    run_name: str,
+    level: str,
+    problem_ids: list[int],
+    sample_id: int,
+    skip_eval_check: bool = False,
+) -> dict:
+    """
+    对指定的 (level, problem_ids) 列表执行代码生成。
+
+    skip_eval_check=True 时跳过 eval_results 过滤（用于重新生成失败任务）。
+    返回 summary dict。
+    """
+    eval_results = {}
+    if not skip_eval_check:
+        eval_results = load_eval_results(run_name)
+        if not eval_results:
+            print(
+                f"Warning: 未找到或无法解析 runs/{run_name}/eval_results.json，"
+                "将不进行任何转换。"
+            )
 
     output_dir = os.path.join(OUTPUT_ROOT, run_name, f"level_{level}")
     os.makedirs(output_dir, exist_ok=True)
@@ -228,27 +264,27 @@ def main():
         "conversion_failed": [],
     }
 
-    total = len(LEVEL_PROBLEMS[level_key])
     for problem_id in tqdm(
-        LEVEL_PROBLEMS[level_key],
-        total=total,
-        desc="生成 CUDA 评估代码",
+        problem_ids,
+        total=len(problem_ids),
+        desc=f"生成 Level {level} CUDA 评估代码",
         unit="题",
         ncols=80,
     ):
-        entry = get_eval_entry_for_sample(eval_results, problem_id, sample_id)
         problem_name = get_problem_name(level, problem_id)
         display_name = problem_name if problem_name else f"problem_{problem_id}"
 
-        if entry is None:
-            summary["no_eval_result"].append(display_name)
-            continue
-        if not entry.get("compiled", False):
-            summary["compile_failed"].append(display_name)
-            continue
-        if not entry.get("correctness", False):
-            summary["output_error"].append(display_name)
-            continue
+        if not skip_eval_check:
+            entry = get_eval_entry_for_sample(eval_results, problem_id, sample_id)
+            if entry is None:
+                summary["no_eval_result"].append(display_name)
+                continue
+            if not entry.get("compiled", False):
+                summary["compile_failed"].append(display_name)
+                continue
+            if not entry.get("correctness", False):
+                summary["output_error"].append(display_name)
+                continue
 
         macro_code, kernel_code, entry_code = extract_kernel_code(
             run_name, level, problem_id, sample_id
@@ -274,7 +310,8 @@ def main():
 
         if not eval_code.startswith("```cpp"):
             print(
-                f"Warning: Generated eval code does not valid c++ code, skipping problem {problem_id}"
+                f"Warning: Generated eval code does not valid c++ code, "
+                f"skipping problem {problem_id}"
             )
             summary["conversion_failed"].append(display_name)
             continue
@@ -289,10 +326,71 @@ def main():
             f.write(eval_code)
         summary["success"].append(display_name)
 
-    summary_path = os.path.join(output_dir, "conversion_summary.json")
-    with open(summary_path, "w", encoding="utf-8") as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2)
-    print(f"转换总结已写入: {summary_path}")
+    return summary
+
+
+def main():
+    args = parse_args()
+    run_name = args.run_name
+    sample_id = 0
+
+    if args.failed_results:
+        # ---------- 失败任务重新生成模式 ----------
+        failed_tasks = parse_failed_tasks(args.failed_results)
+        if not failed_tasks:
+            print(f"未从 {args.failed_results} 中发现失败任务。")
+            return
+
+        print(f"从 {args.failed_results} 解析到失败任务:")
+        for lvl in sorted(failed_tasks):
+            pids = failed_tasks[lvl]
+            print(f"  Level {lvl}: {len(pids)} 个 — {pids}")
+
+        # 若同时指定了 --level，则只处理该 level 的失败任务
+        if args.level:
+            lvl = args.level
+            if lvl not in failed_tasks:
+                print(f"Level {lvl} 没有失败任务。")
+                return
+            levels_to_process = {lvl: failed_tasks[lvl]}
+        else:
+            levels_to_process = failed_tasks
+
+        all_summaries = {}
+        for level_str in sorted(levels_to_process):
+            problem_ids = levels_to_process[level_str]
+            print(f"\n===== 重新生成 Level {level_str} ({len(problem_ids)} 个任务) =====")
+            summary = generate_for_problems(
+                run_name, level_str, problem_ids, sample_id, skip_eval_check=True
+            )
+            all_summaries[f"level_{level_str}"] = summary
+
+            output_dir = os.path.join(OUTPUT_ROOT, run_name, f"level_{level_str}")
+            summary_path = os.path.join(output_dir, "regeneration_summary.json")
+            with open(summary_path, "w", encoding="utf-8") as f:
+                json.dump(summary, f, ensure_ascii=False, indent=2)
+            print(f"  重新生成总结已写入: {summary_path}")
+            print(f"  成功: {len(summary['success'])}, "
+                  f"kernel 缺失: {len(summary['kernel_missing'])}, "
+                  f"转换失败: {len(summary['conversion_failed'])}")
+
+    else:
+        # ---------- 原始全量生成模式 ----------
+        level = args.level
+        level_key = level if level == "4_expand" else int(level)
+        if level_key not in LEVEL_PROBLEMS:
+            raise ValueError(f"不支持的 level: {level}，可选: 1, 2, 3, 4, 4_expand")
+
+        problem_ids = list(LEVEL_PROBLEMS[level_key])
+        summary = generate_for_problems(
+            run_name, level, problem_ids, sample_id, skip_eval_check=False
+        )
+
+        output_dir = os.path.join(OUTPUT_ROOT, run_name, f"level_{level}")
+        summary_path = os.path.join(output_dir, "conversion_summary.json")
+        with open(summary_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
+        print(f"转换总结已写入: {summary_path}")
 
 
 if __name__ == "__main__":
