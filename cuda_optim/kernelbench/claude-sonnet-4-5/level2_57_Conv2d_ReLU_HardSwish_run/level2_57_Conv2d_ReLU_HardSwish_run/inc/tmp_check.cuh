@@ -1,0 +1,34 @@
+#include <cuda_runtime.h>
+#include <type_traits>
+
+__global__ void fused_relu_hardswish_kernel_ori(const float* input, float* output, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        float x = input[idx];
+        // Apply ReLU
+        x = fmaxf(0.0f, x);
+        // Apply HardSwish: x * clamp((x + 3) / 6, 0, 1)
+        float hard_swish_factor = fminf(fmaxf((x + 3.0f) / 6.0f, 0.0f), 1.0f);
+        output[idx] = x * hard_swish_factor;
+    }
+}
+
+template <typename T>
+void test_tmp_kernel_ori(
+    T* input, T* output,
+    int in_batch, int in_height, int in_channels, int in_width,
+    int out_batch, int out_height, int out_channels, int out_width,
+    int in_elems, int out_elems,
+    cudaStream_t stream
+) {
+    static_assert(std::is_same<T, float>::value, "fused_relu_hardswish_kernel_ori only supports float type");
+    
+    const int block_size = 256;
+    const int num_blocks = (in_elems + block_size - 1) / block_size;
+    
+    fused_relu_hardswish_kernel_ori<<<num_blocks, block_size, 0, stream>>>(
+        input, 
+        output, 
+        in_elems
+    );
+}
