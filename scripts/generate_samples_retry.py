@@ -250,6 +250,10 @@ def main(config: RetryGenerationConfig):
     gen_config.subset = config.subset if config.subset != (None, None) else (None, None)
     gen_config.num_samples = num_samples
     gen_config.run_name = config.run_name
+    # 避免 custom_prompt_key 从 to_dict 得到字符串 "None"，导致 get_custom_prompt 报错
+    cpk = getattr(gen_config, "custom_prompt_key", None)
+    if isinstance(cpk, str) and cpk.strip().lower() in {"", "none"}:
+        gen_config.custom_prompt_key = None
 
     problems_to_run = []
     for (problem_id, sample_id) in sorted(to_retry):
