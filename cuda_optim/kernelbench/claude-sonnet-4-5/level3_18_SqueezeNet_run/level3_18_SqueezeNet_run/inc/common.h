@@ -465,3 +465,20 @@ printf("throughput : %f G, time_use:%f,bandwidth:%f TB/S\n",throughput * 1.0f / 
 printf("throughput : %f G\n",throughput * 1.0f / 1024 / 1024 / 1024);
 #define Align(x, y) (((x) + (y)-1) / (y) * (y))
 #define DivUp(x, y) (((x) + (y)-1) / (y))
+null
+Looking at the code snippets, I can identify the following naming conflicts according to your requirements:
+
+1. **Macro `INFINITY`** is defined identically in all three code snippets
+2. **Kernel function `softmax_forward_kernel_opt`** is defined identically in the first two snippets (but this is excluded per your restriction)
+3. **Host function `test_tmp_kernel_opt`** is defined identically in the first two snippets (but this is excluded per your restriction)
+
+However, according to your **Critical Extraction Restriction**, I must:
+- Only extract **functional methods** (methods marked with `__device__`)
+- Exclude all kernel functions marked with `__global__`
+- Exclude the entry functions `test_tmp_kernel_opt` and `test_tmp_kernel_ori`
+
+After applying these restrictions, there are **no functional methods marked with `__device__`** in any of the code snippets. All the code contains only `__global__` kernel functions and host functions, which are excluded from extraction.
+
+Therefore, the output is:
+
+null

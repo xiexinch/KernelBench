@@ -1,3 +1,5 @@
+#include <cuda_runtime.h>
+
 __global__ void conv1x1_relu_kernel_ori(
     const float* __restrict__ input,
     const float* __restrict__ weight,
@@ -37,28 +39,18 @@ void test_tmp_kernel_ori(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
-    int batch_size = in_batch;
-    int height = in_height;
-    int width = in_width;
-    int total_elements = out_elems;
+    const float* weight = reinterpret_cast<const float*>(input + in_elems);
+    const float* bias = reinterpret_cast<const float*>(weight + in_channels * out_channels);
+    
+    int total_elements = out_batch * out_channels * out_height * out_width;
     const int threads = 256;
     const int blocks = (total_elements + threads - 1) / threads;
     
-    // Assuming weight and bias are passed through global memory or constant memory
-    // For this entry point, we need to extract them from the input tensor layout
-    // Based on the torch code, weight has shape [out_channels, in_channels]
-    // and bias has shape [out_channels]
-    
-    // This assumes input layout: [batch, in_channels, height, width]
-    // weight follows after input, bias follows after weight
-    const float* weight = input + in_elems;
-    const float* bias = weight + (out_channels * in_channels);
-    
     conv1x1_relu_kernel_ori<<<blocks, threads, 0, stream>>>(
-        input,
+        reinterpret_cast<const float*>(input),
         weight,
         bias,
-        output,
-        batch_size, in_channels, out_channels, height, width
+        reinterpret_cast<float*>(output),
+        out_batch, in_channels, out_channels, out_height, out_width
     );
 }

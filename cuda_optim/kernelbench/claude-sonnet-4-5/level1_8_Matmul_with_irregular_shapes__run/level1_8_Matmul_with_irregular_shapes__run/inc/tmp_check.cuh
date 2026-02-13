@@ -59,18 +59,27 @@ void test_tmp_kernel_ori(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
-    int M = in_batch;
-    int K = in_height;
-    int N = out_height;
-    
+    // Interpret input as matrix A of shape (M, K)
+    // and assume second matrix B is stored right after A in input buffer
+    // Based on the original torch usage: A is (M, K), B is (K, N)
+    // So total input size = M*K + K*N
+    // But the provided interface only gives one input pointer.
+    // To match the original kernel logic, we reinterpret:
+    // - A starts at input
+    // - B starts at input + M*K
+    // - Output C is of size M*N
+
+    int M = in_batch;      // Reuse in_batch as M
+    int K = in_height;     // Reuse in_height as K
+    int N = in_channels;   // Reuse in_channels as N
+
+    const float* A = reinterpret_cast<const float*>(input);
+    const float* B = reinterpret_cast<const float*>(input + M * K);
+    float* C = reinterpret_cast<float*>(output);
+
     dim3 block_size(TILE_SIZE, TILE_SIZE);
     dim3 grid_size((N + TILE_SIZE - 1) / TILE_SIZE, 
                    (M + TILE_SIZE - 1) / TILE_SIZE);
     
-    matmul_kernel_ori<<<grid_size, block_size, 0, stream>>>(
-        input,
-        input + M * K,
-        output,
-        M, K, N
-    );
+    matmul_kernel_ori<<<grid_size, block_size, 0, stream>>>(A, B, C, M, K, N);
 }

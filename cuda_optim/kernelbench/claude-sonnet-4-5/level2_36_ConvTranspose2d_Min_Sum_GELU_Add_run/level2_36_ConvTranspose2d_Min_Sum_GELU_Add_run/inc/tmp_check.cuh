@@ -2,8 +2,9 @@
 #include <cfloat>
 #include <cmath>
 
-// Note: gelu_activation function is assumed to be defined in external headers 
-// (tmp_check.cuh or tmp_use.cuh) and should not be redefined here
+__device__ float gelu_activation(float x) {
+    return 0.5f * x * (1.0f + erff(x / sqrtf(2.0f)));
+}
 
 __global__ void fused_min_sum_gelu_bias_kernel_ori(
     const float* input,
@@ -51,29 +52,27 @@ __global__ void fused_min_sum_gelu_bias_kernel_ori(
 
 template <typename T>
 void test_tmp_kernel_ori(
-    T* input, T* bias, T* output,
+    T* input, T* output,
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream
-) {
-    // Map to kernel parameters
-    int batch_size = in_batch;
-    int channels = in_channels;
-    int height = in_height;
-    int width = in_width;
-    
+    cudaStream_t stream)
+{
+    // Extract bias from the end of the input buffer
+    // KernelBench convention: bias follows main input data
+    const float* bias_ptr = reinterpret_cast<const float*>(input) + in_elems;
+
     const int threads = 256;
-    const int blocks_x = (width + threads - 1) / threads;
-    dim3 blocks(blocks_x, batch_size);
+    const int blocks_x = (in_width + threads - 1) / threads;
+    dim3 blocks(blocks_x, in_batch);
     
     fused_min_sum_gelu_bias_kernel_ori<<<blocks, threads, 0, stream>>>(
-        (const float*)input,
-        (const float*)bias,
-        (float*)output,
-        batch_size,
-        channels,
-        height,
-        width
+        reinterpret_cast<const float*>(input),
+        bias_ptr,
+        reinterpret_cast<float*>(output),
+        in_batch,
+        in_channels,
+        in_height,
+        in_width
     );
 }

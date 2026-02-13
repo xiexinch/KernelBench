@@ -1,5 +1,3 @@
-#include <cuda_runtime.h>
-
 __global__ void fused_multiply_leaky_relu_kernel_ori(
     const float* input, 
     float* output, 
@@ -19,20 +17,15 @@ void test_tmp_kernel_ori(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream
-) {
-    // Parameters from original model initialization
-    const float multiplier = 2.0f;
-    const float negative_slope = 0.1f;
-    
+    cudaStream_t stream)
+{
+    float multiplier = 2.0f;
+    float negative_slope = 0.1f;
+    int size = in_elems;
+
     const int block_size = 256;
-    const int num_blocks = (in_elems + block_size - 1) / block_size;
-    
+    int num_blocks = (size + block_size - 1) / block_size;
+
     fused_multiply_leaky_relu_kernel_ori<<<num_blocks, block_size, 0, stream>>>(
-        (const float*)input,
-        (float*)output,
-        multiplier,
-        negative_slope,
-        in_elems
-    );
+        input, output, multiplier, negative_slope, size);
 }

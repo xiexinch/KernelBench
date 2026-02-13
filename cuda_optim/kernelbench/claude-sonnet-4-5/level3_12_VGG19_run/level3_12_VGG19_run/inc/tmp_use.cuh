@@ -1,3 +1,7 @@
+#include <cuda_runtime.h>
+#include <algorithm>
+#include <cfloat>
+
 __global__ void conv2d_relu_kernel_opt(
     const float* input,
     const float* weight,
@@ -80,7 +84,43 @@ void test_tmp_kernel_opt(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
-    // This is a placeholder entry function
-    // The actual kernels are called from torch::Tensor wrapper functions
-    // conv2d_relu_cuda and linear_relu_cuda
+    const int block_size = 256;
+    
+    if (in_height == 1 && in_width == 1 && out_height == 1 && out_width == 1) {
+        int batch_size = in_batch;
+        int in_features = in_channels;
+        int out_features = out_channels;
+        int total = batch_size * out_features;
+        int num_blocks = (total + block_size - 1) / block_size;
+        
+        const float* input_ptr = reinterpret_cast<const float*>(input);
+        const float* weight_ptr = input_ptr + in_elems;
+        const float* bias_ptr = weight_ptr + (in_features * out_features);
+        float* output_ptr = reinterpret_cast<float*>(output);
+        
+        linear_relu_kernel_opt<<<num_blocks, block_size, 0, stream>>>(
+            input_ptr, weight_ptr, bias_ptr, output_ptr,
+            batch_size, in_features, out_features
+        );
+    } else {
+        int batch_size = in_batch;
+        int in_ch = in_channels;
+        int out_ch = out_channels;
+        int height = in_height;
+        int width = in_width;
+        int kernel_size = 3;
+        int padding = 1;
+        int total = out_elems;
+        int num_blocks = (total + block_size - 1) / block_size;
+        
+        const float* input_ptr = reinterpret_cast<const float*>(input);
+        const float* weight_ptr = input_ptr + in_elems;
+        const float* bias_ptr = weight_ptr + (in_ch * out_ch * kernel_size * kernel_size);
+        float* output_ptr = reinterpret_cast<float*>(output);
+        
+        conv2d_relu_kernel_opt<<<num_blocks, block_size, 0, stream>>>(
+            input_ptr, weight_ptr, bias_ptr, output_ptr,
+            batch_size, in_ch, out_ch, height, width, kernel_size, padding
+        );
+    }
 }

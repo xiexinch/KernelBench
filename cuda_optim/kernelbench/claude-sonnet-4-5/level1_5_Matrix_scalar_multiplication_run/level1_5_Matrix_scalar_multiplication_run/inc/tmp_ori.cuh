@@ -30,15 +30,15 @@ void test_tmp_kernel_opt(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
+    float s = 3.14f; // scalar value from example
     int size = in_elems;
-    float s = 3.14;
     const int block_size = 256;
     const int num_blocks = ((size / 4) + block_size - 1) / block_size;
     
     matrix_scalar_mul_kernel_opt<<<num_blocks, block_size, 0, stream>>>(
-        input, 
-        output, 
-        s, 
+        reinterpret_cast<const float*>(input),
+        reinterpret_cast<float*>(output),
+        s,
         size
     );
 }

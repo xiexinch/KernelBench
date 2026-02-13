@@ -1,5 +1,5 @@
 #include <cuda_runtime.h>
-#include <math.h>
+#include <cmath>
 
 __global__ void subtract_hardswish_kernel_ori(const float* input, float* output, 
                                           float subtract_val, int size) {
@@ -56,23 +56,21 @@ void test_tmp_kernel_ori(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
-    const int block_size = 256;
-    float* input_f = (float*)input;
-    float* output_f = (float*)output;
-    
+    // Determine which kernel to launch based on shape change
     if (in_elems == out_elems) {
-        // subtract_hardswish: element-wise operation
-        float subtract_val = 0.5f;  // From get_init_inputs
+        // Same number of elements: use subtract_hardswish
+        float subtract_val = 0.5f; // as used in the original model
+        const int block_size = 256;
         int num_blocks = (in_elems + block_size - 1) / block_size;
         subtract_hardswish_kernel_ori<<<num_blocks, block_size, 0, stream>>>(
-            input_f, output_f, subtract_val, in_elems);
+            input, output, subtract_val, in_elems);
     } else {
-        // maxpool2d_mish: pooling operation with spatial reduction
-        // Infer kernel_size from dimension change (assuming square kernel)
-        int kernel_size = in_height / out_height;
+        // Shape changed: use maxpool2d_mish
+        int kernel_size = in_height / out_height; // assuming square pooling
+        const int block_size = 256;
         int num_blocks = (out_elems + block_size - 1) / block_size;
         maxpool2d_mish_kernel_ori<<<num_blocks, block_size, 0, stream>>>(
-            input_f, output_f,
+            input, output,
             in_batch, in_channels, in_height, in_width,
             out_height, out_width, kernel_size);
     }

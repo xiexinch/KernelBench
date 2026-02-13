@@ -1,3 +1,6 @@
+#include <cuda_runtime.h>
+#include <cmath>
+
 __device__ float sigmoid(float x) {
     return 1.0f / (1.0f + expf(-x));
 }
@@ -67,22 +70,42 @@ void test_tmp_kernel_opt(
     cudaStream_t stream)
 {
     int batch_size = in_batch;
-    int input_size = in_channels;
-    int hidden_size = out_channels;
+    int input_size = in_width;
+    int hidden_size = out_width;
+
+    // Input tensors layout:
+    // [x, h_prev, c_prev, weight_ih, weight_hh, bias_ih, bias_hh]
+    T* x = input;
+    T* h_prev = x + batch_size * input_size;
+    T* c_prev = h_prev + batch_size * hidden_size;
     
-    const float* x = input;
-    const float* h_prev = input + batch_size * input_size;
-    const float* c_prev = input + batch_size * input_size + batch_size * hidden_size;
-    const float* weight_ih = input + batch_size * input_size + 2 * batch_size * hidden_size;
-    const float* weight_hh = weight_ih + 4 * hidden_size * input_size;
-    const float* bias_ih = weight_hh + 4 * hidden_size * hidden_size;
-    const float* bias_hh = bias_ih + 4 * hidden_size;
+    // Output tensors layout:
+    // [h_new, c_new]
+    T* h_new = output;
+    T* c_new = h_new + batch_size * hidden_size;
     
-    float* h_new = output;
-    float* c_new = output + batch_size * hidden_size;
-    
-    dim3 grid(batch_size);
-    dim3 block(hidden_size);
-    
-    lstm_cell_forward_kernel_opt<<<grid, block, 0, stream>>>(
-        x, h_
+    // Weights and biases come after all input tensors
+    size_t inputs_offset = batch_size * input_size + 2 * batch_size * hidden_size;
+    T* weight_ih = input + inputs_offset;
+    T* weight_hh = weight_ih + 4 * hidden_size * input_size;
+    T* bias_ih = weight_hh + 4 * hidden_size * hidden_size;
+    T* bias_hh = bias_ih + 4 * hidden_size;
+
+    dim3 blocks(batch_size);
+    dim3 threads(hidden_size);
+
+    lstm_cell_forward_kernel_opt<<<blocks, threads, 0, stream>>>(
+        reinterpret_cast<const float*>(x),
+        reinterpret_cast<const float*>(h_prev),
+        reinterpret_cast<const float*>(c_prev),
+        reinterpret_cast<const float*>(weight_ih),
+        reinterpret_cast<const float*>(weight_hh),
+        reinterpret_cast<const float*>(bias_ih),
+        reinterpret_cast<const float*>(bias_hh),
+        reinterpret_cast<float*>(h_new),
+        reinterpret_cast<float*>(c_new),
+        batch_size,
+        input_size,
+        hidden_size
+    );
+}

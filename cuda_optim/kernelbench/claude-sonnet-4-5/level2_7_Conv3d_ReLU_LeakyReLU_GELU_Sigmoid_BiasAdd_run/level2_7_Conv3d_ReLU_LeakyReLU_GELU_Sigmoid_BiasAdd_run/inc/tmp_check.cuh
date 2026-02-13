@@ -1,12 +1,8 @@
 #include <cuda_runtime.h>
-#include <math.h>
+#include <cmath>
 
 __device__ float gelu_activation(float x) {
-    const float sqrt_2_over_pi = 0.7978845608028654f;
-    const float coeff = 0.044715f;
-    float x_cubed = x * x * x;
-    float tanh_arg = sqrt_2_over_pi * (x + coeff * x_cubed);
-    return 0.5f * x * (1.0f + tanhf(tanh_arg));
+    return 0.5f * x * (1.0f + tanhf(0.7978845608028654f * (x + 0.044715f * x * x * x)));
 }
 
 __global__ void fused_activations_kernel_ori(
@@ -24,20 +20,24 @@ __global__ void fused_activations_kernel_ori(
     
     if (idx < total_size) {
         int spatial_size = depth * height * width;
-        int temp = idx / spatial_size;
-        int channel_idx = temp % channels;
+        int channel_idx = (idx / spatial_size) % channels;
         
         float val = input[idx];
         
+        // ReLU
         val = fmaxf(val, 0.0f);
         
+        // LeakyReLU with negative_slope=0.01
         val = (val > 0.0f) ? val : (0.01f * val);
         
+        // GELU
         val = gelu_activation(val);
         
+        // Sigmoid
         val = 1.0f / (1.0f + expf(-val));
         
-        val = val + bias[channel_idx];
+        // Add bias
+        val += bias[channel_idx];
         
         output[idx] = val;
     }
@@ -51,26 +51,45 @@ void test_tmp_kernel_ori(
     int in_elems, int out_elems,
     cudaStream_t stream
 ) {
-    float* input_f = reinterpret_cast<float*>(input);
-    float* output_f = reinterpret_cast<float*>(output);
-    
-    float* bias_d = nullptr;
-    cudaMalloc(&bias_d, in_channels * sizeof(float));
-    cudaMemset(bias_d, 0, in_channels * sizeof(float));
-    
+    int batch_size = in_batch;
+    int channels = in_channels;
+    int depth = 1;
+    int height = in_height;
+    int width = in_width;
+
+    int total_size = batch_size * channels * depth * height * width;
+    if (total_size != in_elems) {
+        depth = in_height;
+        height = in_width;
+        width = 1;
+        total_size = batch_size * channels * depth * height * width;
+    }
+    if (total_size != in_elems) {
+        depth = 1;
+        height = in_height;
+        width = in_width;
+        total_size = batch_size * channels * depth * height * width;
+    }
+    if (total_size != in_elems) {
+        depth = in_elems / (batch_size * channels);
+        height = 1;
+        width = 1;
+        total_size = batch_size * channels * depth * height * width;
+    }
+
     const int block_size = 256;
-    const int num_blocks = (in_elems + block_size - 1) / block_size;
-    
+    const int num_blocks = (total_size + block_size - 1) / block_size;
+
+    const float* bias_ptr = reinterpret_cast<const float*>(input) + in_elems;
+
     fused_activations_kernel_ori<<<num_blocks, block_size, 0, stream>>>(
-        input_f,
-        bias_d,
-        output_f,
-        in_batch,
-        in_channels,
-        1,
-        in_height,
-        in_width
+        reinterpret_cast<const float*>(input),
+        bias_ptr,
+        reinterpret_cast<float*>(output),
+        batch_size,
+        channels,
+        depth,
+        height,
+        width
     );
-    
-    cudaFree(bias_d);
 }

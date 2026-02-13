@@ -38,25 +38,25 @@ void test_tmp_kernel_ori(
     cudaStream_t stream)
 {
     int batch_size = in_batch;
-    int feature_size = in_height;
-    int dim = 1;
-    
+    int feature_size = in_height * in_channels * in_width;
+
     const int block_size = 256;
-    
+    int dim = 1; // default to dim=1 as per example usage
+
     if (dim == 1) {
         const int num_blocks = (batch_size + block_size - 1) / block_size;
         reverse_cumsum_kernel_dim1_ori<<<num_blocks, block_size, 0, stream>>>(
-            input, 
-            output, 
-            batch_size, 
+            reinterpret_cast<const float*>(input),
+            reinterpret_cast<float*>(output),
+            batch_size,
             feature_size
         );
     } else if (dim == 0) {
         const int num_blocks = (feature_size + block_size - 1) / block_size;
         reverse_cumsum_kernel_dim0_ori<<<num_blocks, block_size, 0, stream>>>(
-            input, 
-            output, 
-            batch_size, 
+            reinterpret_cast<const float*>(input),
+            reinterpret_cast<float*>(output),
+            batch_size,
             feature_size
         );
     }

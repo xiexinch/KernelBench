@@ -15,14 +15,13 @@ void test_tmp_kernel_opt(
     cudaStream_t stream)
 {
     int size = in_elems;
-    float negative_slope = 0.01;
+    float negative_slope = 0.01f;
     const int block_size = 256;
-    const int num_blocks = (size + block_size - 1) / block_size;
-    
+    int num_blocks = (size + block_size - 1) / block_size;
     leaky_relu_kernel_opt<<<num_blocks, block_size, 0, stream>>>(
-        input, 
-        output, 
-        size, 
+        reinterpret_cast<const float*>(input),
+        reinterpret_cast<float*>(output),
+        size,
         negative_slope
     );
 }

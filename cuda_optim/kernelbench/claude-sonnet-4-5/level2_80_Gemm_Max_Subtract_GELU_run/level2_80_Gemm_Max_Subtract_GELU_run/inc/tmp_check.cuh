@@ -1,5 +1,6 @@
 #include <cuda_runtime.h>
-#include <cfloat>
+#include <float.h>
+#include <math.h>
 
 #define BLOCK_SIZE 256
 
@@ -59,16 +60,14 @@ void test_tmp_kernel_ori(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream
-) {
-    // Map 4D tensor layout to 2D kernel parameters
-    // Assumes input is (batch, 1, 1, features) and output is (batch, 1, 1, 1)
+    cudaStream_t stream)
+{
     int batch_size = in_batch;
-    int features = in_width;
-    
+    int features = in_elems / in_batch;
+
     dim3 grid(batch_size);
     dim3 block(BLOCK_SIZE);
-    
+
     fused_max_mean_sub_gelu_kernel_ori<<<grid, block, 0, stream>>>(
         reinterpret_cast<const float*>(input),
         reinterpret_cast<float*>(output),

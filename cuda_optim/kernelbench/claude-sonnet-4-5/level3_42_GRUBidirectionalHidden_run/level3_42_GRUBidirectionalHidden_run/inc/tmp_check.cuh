@@ -1,10 +1,10 @@
-__device__ float sigmoid(float x) {
-    return 1.0f / (1.0f + expf(-x));
-}
+#include <cuda_runtime.h>
+#include <cmath>
 
-__device__ float tanh_activation(float x) {
-    return tanhf(x);
-}
+#define BLOCK_SIZE 256
+
+
+
 
 __global__ void gru_cell_forward_kernel_ori(
     const float* __restrict__ x_input,
@@ -49,23 +49,23 @@ void test_tmp_kernel_ori(
     cudaStream_t stream)
 {
     int batch_size = in_batch;
-    int hidden_size = out_channels;
+    int hidden_size = in_width;
+    int total_size = batch_size * hidden_size;
+
+    const float* gates_x = reinterpret_cast<const float*>(input);
+    const float* h_prev = reinterpret_cast<const float*>(output);
+    const float* gates_h = reinterpret_cast<const float*>(input) + batch_size * hidden_size * 3;
+    float* h_out = reinterpret_cast<float*>(output);
+
     const int block_size = BLOCK_SIZE;
-    int num_blocks = (batch_size * hidden_size + block_size - 1) / block_size;
-    
-    // Assuming input layout: [x_input, h_prev, gates_x, gates_h]
-    // This is a simplified entry point - actual tensor splitting would be needed
-    const float* x_input = input;
-    const float* h_prev = input + batch_size * in_channels;
-    const float* gates_x = input + 2 * batch_size * in_channels;
-    const float* gates_h = input + 2 * batch_size * in_channels + batch_size * hidden_size * 3;
-    
+    int num_blocks = (total_size + block_size - 1) / block_size;
+
     gru_cell_forward_kernel_ori<<<num_blocks, block_size, 0, stream>>>(
-        x_input,
+        nullptr,
         h_prev,
         gates_x,
         gates_h,
-        output,
+        h_out,
         batch_size,
         hidden_size
     );

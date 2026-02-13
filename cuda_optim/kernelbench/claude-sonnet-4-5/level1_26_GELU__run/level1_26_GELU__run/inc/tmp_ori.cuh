@@ -1,14 +1,9 @@
 __global__ void gelu_kernel_opt(const float* x, float* out, int size) {
-__global__ void gelu_kernel_opt(const float* x, float* out, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         float val = x[idx];
         out[idx] = 0.5f * val * (1.0f + erff(val * 0.707106781f));
     }
-}
-}
-}
-
 }
 
 template <typename T>
@@ -18,9 +13,8 @@ void test_tmp_kernel_opt(
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
     cudaStream_t stream)
-    {
-    int size = in_elems;
+{
     const int block_size = 256;
-    const int num_blocks = (size + block_size - 1) / block_size;
-    gelu_kernel_opt<<<num_blocks, block_size>>>(input, output, size);
+    int num_blocks = (in_elems + block_size - 1) / block_size;
+    gelu_kernel_opt<<<num_blocks, block_size, 0, stream>>>(input, output, in_elems);
 }

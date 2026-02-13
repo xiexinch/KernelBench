@@ -14,10 +14,9 @@ void test_tmp_kernel_ori(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
-    int size = in_elems;
-    float min_val = -1.0;
-    float max_val = 1.0;
     const int block_size = 256;
-    const int num_blocks = (size + block_size - 1) / block_size;
-    hardtanh_kernel_ori<<<num_blocks, block_size>>>(input, output, size, min_val, max_val);
+    int num_blocks = (in_elems + block_size - 1) / block_size;
+    float min_val = -1.0f;
+    float max_val = 1.0f;
+    hardtanh_kernel_ori<<<num_blocks, block_size, 0, stream>>>(input, output, in_elems, min_val, max_val);
 }

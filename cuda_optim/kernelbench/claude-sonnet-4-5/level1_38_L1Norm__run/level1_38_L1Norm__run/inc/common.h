@@ -465,3 +465,9 @@ printf("throughput : %f G, time_use:%f,bandwidth:%f TB/S\n",throughput * 1.0f / 
 printf("throughput : %f G\n",throughput * 1.0f / 1024 / 1024 / 1024);
 #define Align(x, y) (((x) + (y)-1) / (y) * (y))
 #define DivUp(x, y) (((x) + (y)-1) / (y))
+__device__ float warp_reduce_sum(float val) {
+    for (int offset = 16; offset > 0; offset /= 2) {
+        val += __shfl_down_sync(0xFFFFFFFF, val, offset);
+    }
+    return val;
+}

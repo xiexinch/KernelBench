@@ -1,6 +1,7 @@
 #include <cuda_runtime.h>
-#include <cfloat>
 #include <cmath>
+
+#define INFINITY __int_as_float(0x7f800000)
 
 template <typename scalar_t>
 __global__ void softmax_forward_kernel_ori(
@@ -18,7 +19,7 @@ __global__ void softmax_forward_kernel_ori(
     const int tid = threadIdx.x;
     
     // Find maximum value in the row (online)
-    float thread_max = -FLT_MAX;
+    float thread_max = -INFINITY;
     for (int i = tid; i < num_features; i += blockDim.x) {
         float val = static_cast<float>(input[batch_idx * stride + i]);
         thread_max = fmaxf(thread_max, val);
@@ -76,12 +77,10 @@ void test_tmp_kernel_ori(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
-    // Extract parameters from the input dimensions
     const int batch_size = in_batch;
-    const int num_features = in_channels;  // Assuming channels dimension is the feature dimension
-    const int stride = in_channels;  // Assuming contiguous layout
+    const int num_features = in_elems / batch_size;
+    const int stride = num_features;
     
-    // Optimize thread block size based on problem dimensions
     const int threads_per_block = 256;
     const int shared_mem_size = 2 * threads_per_block * sizeof(float);
     

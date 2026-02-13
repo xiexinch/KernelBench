@@ -1,6 +1,5 @@
 #include <cuda_runtime.h>
 #include <math.h>
-#include <cassert>
 
 __global__ void groupnorm_swish_kernel_opt(
     const float* x, 
@@ -67,79 +66,52 @@ __global__ void multiply_swish_kernel_v2_opt(
     }
 }
 
-__global__ void fill_kernel_opt(float* data, int size, float value) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        data[idx] = value;
-    }
-}
-
 template <typename T>
 void test_tmp_kernel_opt(
     T* input, T* output,
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream
-) {
-    static_assert(std::is_same<T, float>::value, "Only float type is supported");
-    
-    // Calculate dimensions assuming flattened spatial dimensions into channels
-    int batch_size = in_batch;
-    int channels = in_channels * in_height * in_width;
-    int total_elems = batch_size * channels;
-    
-    // Verify dimensions are consistent
-    assert(total_elems == in_elems);
-    assert(out_elems == in_elems);
-    assert(out_batch == in_batch);
-    assert(out_channels * out_height * out_width == channels);
-    
-    // GroupNorm parameters
-    const int num_groups = 32;
-    const float eps = 1e-5f;
-    
-    // Ensure channels is divisible by num_groups
-    if (channels % num_groups != 0) {
-        // Fallback: adjust num_groups to ensure divisibility for benchmark purposes
-        // This should not happen with standard inputs
+    cudaStream_t stream)
+{
+    // Determine which kernel to launch based on dimensions
+    // For groupnorm_swish: expects 2D layout [batch, channels], no spatial dims
+    // So we assume in_height == in_width == 1
+    if (in_height == 1 && in_width == 1 && out_height == 1 && out_width == 1) {
+        int batch_size = in_batch;
+        int channels = in_channels;
+        int num_groups = 32; // default from example
+        int group_size = channels / num_groups;
+        float eps = 1e-5f;
+
+        const int block_size = 256;
+        const int num_blocks = (batch_size * num_groups + block_size - 1) / block_size;
+
+        groupnorm_swish_kernel_opt<<<num_blocks, block_size, 0, stream>>>(
+            reinterpret_cast<const float*>(input),
+            reinterpret_cast<const float*>(input + in_elems),      // gamma after input
+            reinterpret_cast<const float*>(input + in_elems * 2),  // beta after gamma
+            reinterpret_cast<float*>(output),
+            batch_size,
+            channels,
+            group_size,
+            num_groups,
+            eps
+        );
+    } else {
+        // Otherwise assume multiply_swish path
+        int batch_size = in_batch * in_height * in_width;
+        int channels = in_channels;
+
+        const int block_size = 256;
+        const int num_blocks = (batch_size * channels + block_size - 1) / block_size;
+
+        multiply_swish_kernel_v2_opt<<<num_blocks, block_size, 0, stream>>>(
+            reinterpret_cast<const float*>(input),
+            reinterpret_cast<const float*>(input + in_elems), // weight after input
+            reinterpret_cast<float*>(output),
+            batch_size,
+            channels
+        );
     }
-    int group_size = channels / num_groups;
-    
-    // Allocate temporary buffer and weight buffers
-    T* temp = nullptr;
-    T* gamma = nullptr;
-    T* beta = nullptr;
-    T* weight = nullptr;
-    
-    cudaMalloc(&temp, total_elems * sizeof(T));
-    cudaMalloc(&gamma, channels * sizeof(T));
-    cudaMalloc(&beta, channels * sizeof(T));
-    cudaMalloc(&weight, channels * sizeof(T));
-    
-    // Initialize weights: gamma=1.0, beta=0.0, weight=1.0
-    const int init_block_size = 256;
-    int init_blocks = (channels + init_block_size - 1) / init_block_size;
-    fill_kernel_opt<<<init_blocks, init_block_size, 0, stream>>>(gamma, channels, 1.0f);
-    fill_kernel_opt<<<init_blocks, init_block_size, 0, stream>>>(beta, channels, 0.0f);
-    fill_kernel_opt<<<init_blocks, init_block_size, 0, stream>>>(weight, channels, 1.0f);
-    
-    // Launch GroupNorm + Swish kernel
-    const int block_size = 256;
-    int num_blocks_1 = (batch_size * num_groups + block_size - 1) / block_size;
-    groupnorm_swish_kernel_opt<<<num_blocks_1, block_size, 0, stream>>>(
-        input, gamma, beta, temp, batch_size, channels, group_size, num_groups, eps
-    );
-    
-    // Launch Multiply + Swish kernel
-    int num_blocks_2 = (total_elems + block_size - 1) / block_size;
-    multiply_swish_kernel_v2_opt<<<num_blocks_2, block_size, 0, stream>>>(
-        temp, weight, output, batch_size, channels
-    );
-    
-    // Cleanup
-    cudaFree(temp);
-    cudaFree(gamma);
-    cudaFree(beta);
-    cudaFree(weight);
 }

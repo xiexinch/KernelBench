@@ -1,9 +1,11 @@
-__device__ float warp_reduce_sum(float val) {
-    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
-        val += __shfl_down_sync(0xffffffff, val, offset);
-    }
-    return val;
-}
+#include <algorithm>
+#include <cuda_runtime.h>
+
+#define WARP_SIZE 32
+#define MAX_BLOCK_SIZE 1024
+
+
+
 
 __global__ void sum_reduction_dim1_kernel_ori(
     const float* __restrict__ input,
@@ -60,14 +62,14 @@ void test_tmp_kernel_ori(
 {
     int batch_size = in_batch;
     int dim1 = in_height;
-    int dim2 = in_channels;
-    
+    int dim2 = in_width;
+
     dim3 grid(batch_size, dim2);
-    int block_size = min(1024, ((dim1 + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE);
-    
+    int block_size = std::min(MAX_BLOCK_SIZE, ((dim1 + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE);
+
     sum_reduction_dim1_kernel_ori<<<grid, block_size, 0, stream>>>(
-        input,
-        output,
+        reinterpret_cast<const float*>(input),
+        reinterpret_cast<float*>(output),
         batch_size,
         dim1,
         dim2

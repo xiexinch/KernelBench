@@ -25,8 +25,15 @@ void test_tmp_kernel_opt(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
-    int size = in_elems;
+    // Determine which kernel to launch based on the presence of bias
+    // Since we only have input and output pointers, and no bias pointer,
+    // we assume this is the inplace ReLU case (relu_kernel_opt).
+    // The relu_bias_kernel_opt requires a separate bias array, which isn't provided here.
+    // So we map to relu_kernel_opt using output as the data array (in-place style).
+
+    int size = out_elems; // assuming output is what we apply ReLU to
     const int block_size = 256;
     int num_blocks = (size + block_size - 1) / block_size;
-    relu_kernel_opt<<<num_blocks, block_size, 0, stream>>>(input, size);
+
+    relu_kernel_opt<<<num_blocks, block_size, 0, stream>>>(reinterpret_cast<float*>(output), size);
 }

@@ -1,6 +1,3 @@
-#include <cuda_runtime.h>
-#include <math.h>
-
 __global__ void fused_ops_kernel_opt(
     const float* gemm_out,
     const float* subtract_param,
@@ -47,32 +44,36 @@ void test_tmp_kernel_opt(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream
-) {
-    // Input buffer layout: [gemm_out (in_batch * in_width) | subtract_param (in_width) | original_x (out_batch * out_width)]
-    // Mapping:
-    //   batch_size = in_batch
-    //   out_features = in_width  
-    //   in_features = out_width
-    
-    int batch_size = in_batch;
-    int out_features = in_width;
-    int in_features = out_width;
-    
-    // Cast to float pointers (kernel is float-specific)
-    float* gemm_out = reinterpret_cast<float*>(input);
-    float* subtract_param = reinterpret_cast<float*>(input + batch_size * out_features);
-    float* original_x = reinterpret_cast<float*>(input + batch_size * out_features + out_features);
-    float* out_ptr = reinterpret_cast<float*>(output);
-    
+    cudaStream_t stream)
+{
+    // Map inputs to kernel arguments:
+    // input layout assumed as:
+    //   input[0:in_batch*out_features]               -> gemm_out
+    //   input[in_batch*out_features : ...]           -> subtract_param (size = out_features)
+    //   input[in_batch*out_features + out_features : ...] -> original_x (size = in_batch * in_features)
+
+    // Based on the original kernel signature, we need:
+    // - gemm_out:      [batch_size, out_features]
+    // - subtract_param:[out_features]
+    // - original_x:    [batch_size, in_features]
+
+    // From the test function signature, infer dimensions:
+    int batch_size = in_batch; // or out_batch — both should match
+    int out_features = in_channels; // inferred from gemm_out shape: [batch, out_features]
+    int in_features = out_channels; // inferred from output shape: [batch, in_features]
+
+    const float* gemm_out = reinterpret_cast<const float*>(input);
+    const float* subtract_param = reinterpret_cast<const float*>(input + batch_size * out_features);
+    const float* original_x = reinterpret_cast<const float*>(input + batch_size * out_features + out_features);
+
     const int block_size = 256;
     const int num_blocks = (batch_size + block_size - 1) / block_size;
-    
+
     fused_ops_kernel_opt<<<num_blocks, block_size, 0, stream>>>(
         gemm_out,
         subtract_param,
         original_x,
-        out_ptr,
+        reinterpret_cast<float*>(output),
         batch_size,
         out_features,
         in_features

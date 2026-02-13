@@ -1,4 +1,5 @@
 #include <cuda_runtime.h>
+#include <cmath>
 #include <float.h>
 
 __global__ void fused_softmax_sigmoid_kernel_opt(
@@ -44,25 +45,21 @@ void test_tmp_kernel_opt(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream
-) {
-    // Cast to float pointers (kernel is float-specific)
-    float* input_f = reinterpret_cast<float*>(input);
-    float* output_f = reinterpret_cast<float*>(output);
-    
-    // Calculate spatial_size from total elements / (batch * channels)
-    // This handles 3D spatial dimensions (D*H*W) flattened
-    int spatial_size = in_elems / (in_batch * in_channels);
+    cudaStream_t stream)
+{
+    int batch_size = in_batch;
+    int channels = in_channels;
+    int spatial_size = in_elems / (batch_size * channels);
     
     const int threads = 256;
-    const int total_spatial = in_batch * spatial_size;
+    const int total_spatial = batch_size * spatial_size;
     const int blocks = (total_spatial + threads - 1) / threads;
     
     fused_softmax_sigmoid_kernel_opt<<<blocks, threads, 0, stream>>>(
-        input_f,
-        output_f,
-        in_batch,
-        in_channels,
+        reinterpret_cast<const float*>(input),
+        reinterpret_cast<float*>(output),
+        batch_size,
+        channels,
         spatial_size
     );
 }

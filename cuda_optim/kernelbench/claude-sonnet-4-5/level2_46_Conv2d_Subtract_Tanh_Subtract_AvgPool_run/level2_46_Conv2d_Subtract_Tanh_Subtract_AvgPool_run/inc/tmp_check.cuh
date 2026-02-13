@@ -1,6 +1,3 @@
-#include <cuda_runtime.h>
-#include <math.h>
-
 __global__ void fused_subtract_tanh_subtract_avgpool_kernel_ori(
     const float* __restrict__ input,
     float* __restrict__ output,
@@ -59,26 +56,26 @@ void test_tmp_kernel_ori(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream
-) {
-    const float subtract1_value = 0.5f;
-    const float subtract2_value = 0.2f;
-    const int kernel_size = in_height / out_height;
-    
+    cudaStream_t stream)
+{
+    const int batch_size = in_batch;
+    const int channels = in_channels;
+    const int kernel_size = in_width / out_width; // assuming square and uniform pooling
+
     const int block_size = 256;
     const int num_blocks = (out_elems + block_size - 1) / block_size;
-    
+
     fused_subtract_tanh_subtract_avgpool_kernel_ori<<<num_blocks, block_size, 0, stream>>>(
-        reinterpret_cast<const float*>(input),
-        reinterpret_cast<float*>(output),
-        in_batch,
-        in_channels,
+        input,
+        output,
+        batch_size,
+        channels,
         in_height,
         in_width,
         out_height,
         out_width,
-        subtract1_value,
-        subtract2_value,
+        0.5f, // subtract1_value
+        0.2f, // subtract2_value
         kernel_size
     );
 }

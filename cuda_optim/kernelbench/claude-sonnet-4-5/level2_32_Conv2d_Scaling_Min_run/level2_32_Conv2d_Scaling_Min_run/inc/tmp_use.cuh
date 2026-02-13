@@ -1,6 +1,3 @@
-#include <cuda_runtime.h>
-#include <math.h>
-
 __global__ void scale_min_reduce_kernel_opt(
     const float* __restrict__ input,
     float* __restrict__ output,
@@ -34,23 +31,23 @@ void test_tmp_kernel_opt(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream
-) {
+    cudaStream_t stream)
+{
+    const int batch_size = in_batch;
+    const int channels = in_channels;
     const int spatial_size = in_height * in_width;
-    
+    const float scale_factor = 2.0f;
+
     const int threads = 256;
     const int blocks_x = (spatial_size + threads - 1) / threads;
-    dim3 blocks(blocks_x, in_batch);
-    
-    // Scale factor from original evaluation context
-    const float scale_factor = 2.0f;
-    
+    dim3 blocks(blocks_x, batch_size);
+
     scale_min_reduce_kernel_opt<<<blocks, threads, 0, stream>>>(
         reinterpret_cast<const float*>(input),
         reinterpret_cast<float*>(output),
         scale_factor,
-        in_batch,
-        in_channels,
+        batch_size,
+        channels,
         spatial_size
     );
 }

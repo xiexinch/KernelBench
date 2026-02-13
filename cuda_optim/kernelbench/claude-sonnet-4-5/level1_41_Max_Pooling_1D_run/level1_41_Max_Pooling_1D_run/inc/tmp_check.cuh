@@ -1,3 +1,8 @@
+#include <climits>
+#include <cfloat>
+#include <cuda_runtime.h>
+#include <device_launch_parameters.h>
+
 __global__ void maxpool1d_kernel_ori(
     const float* __restrict__ input,
     float* __restrict__ output,
@@ -45,16 +50,15 @@ void test_tmp_kernel_ori(
     int features = in_channels;
     int input_length = in_width;
     int output_length = out_width;
-    
+
     int kernel_size = 8;
     int stride = 1;
     int padding = 4;
     int dilation = 3;
-    
-    int total_elements = batch_size * features * output_length;
+
     const int threads = 256;
-    const int blocks = (total_elements + threads - 1) / threads;
-    
+    const int blocks = (out_elems + threads - 1) / threads;
+
     maxpool1d_kernel_ori<<<blocks, threads, 0, stream>>>(
         input,
         output,

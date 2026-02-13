@@ -53,18 +53,19 @@ void test_tmp_kernel_ori(
     int channels = in_channels;
     int height = in_height;
     int width = in_width;
+    
+    // These parameters are fixed as per original kernel assumptions
     int kernel_size = 4;
     int stride = 1;
     int padding = 1;
     int dilation = 1;
-    
-    int total_outputs = batch_size * channels * out_height * out_width;
+
     const int block_size = 256;
-    const int num_blocks = (total_outputs + block_size - 1) / block_size;
-    
+    int num_blocks = (out_elems + block_size - 1) / block_size;
+
     maxpool2d_kernel_ori<<<num_blocks, block_size, 0, stream>>>(
-        input,
-        output,
+        reinterpret_cast<const float*>(input),
+        reinterpret_cast<float*>(output),
         batch_size,
         channels,
         height,

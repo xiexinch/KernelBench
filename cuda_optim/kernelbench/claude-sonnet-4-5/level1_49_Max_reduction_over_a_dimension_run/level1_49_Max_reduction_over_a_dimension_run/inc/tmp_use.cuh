@@ -1,9 +1,9 @@
-__device__ float warp_reduce_max(float val) {
-    for (int offset = 16; offset > 0; offset /= 2) {
-        val = fmaxf(val, __shfl_down_sync(0xffffffff, val, offset));
-    }
-    return val;
-}
+#include <cuda_runtime.h>
+#include <float.h>
+#include <algorithm>
+
+
+
 
 __global__ void max_reduction_kernel_opt(const float* input, float* output, 
                                      int batch_size, int reduce_dim, int inner_dim) {
@@ -52,21 +52,30 @@ void test_tmp_kernel_opt(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
-    int batch_size = in_batch;
-    int reduce_dim = in_height;
-    int inner_dim = in_channels * in_width;
-    
+    // Reconstruct dimensions as in the original torch code
+    // The original kernel reduces over a specific dimension.
+    // Based on the tensor layout and typical usage, we assume:
+    // - Input shape: [in_batch, in_height, in_channels, in_width]
+    // - Reduction is performed over the 'in_channels' dimension (dim=2)
+    // - Thus: batch_size = in_batch * in_height
+    //         reduce_dim = in_channels
+    //         inner_dim = in_width
+
+    int batch_size = in_batch * in_height;
+    int reduce_dim = in_channels;
+    int inner_dim = in_width;
+
     dim3 block(256, 1);
     if (inner_dim > 1) {
         block.x = 256;
-        block.y = (inner_dim < 4) ? inner_dim : 4;
+        block.y = std::min(4, inner_dim);
     }
-    
+
     dim3 grid((inner_dim + block.y - 1) / block.y, batch_size);
-    
+
     max_reduction_kernel_opt<<<grid, block, 0, stream>>>(
-        input,
-        output,
+        reinterpret_cast<const float*>(input),
+        reinterpret_cast<float*>(output),
         batch_size,
         reduce_dim,
         inner_dim

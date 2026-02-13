@@ -1,9 +1,8 @@
 #include <cuda_runtime.h>
-#include <math.h>
+#include <cmath>
 
-__device__ __forceinline__ float gelu_kernel(float x) {
-    // GELU(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
-    return 0.5f * x * (1.0f + erff(x * 0.7071067811865475f));
+__device__ float gelu_kernel(float x) {
+    return 0.5f * x * (1.0f + tanhf(0.7978845608028654f * (x + 0.044715f * x * x * x)));
 }
 
 __global__ void fused_add_min_gelu_mul_kernel_ori(
@@ -38,17 +37,15 @@ void test_tmp_kernel_ori(
 ) {
     const float add_value = 0.5f;
     const float multiply_value = 2.0f;
-    
-    if (in_elems <= 0) return;
-    
+    const int size = in_elems;
     const int block_size = 256;
-    const int num_blocks = (in_elems + block_size - 1) / block_size;
-    
+    const int num_blocks = (size + block_size - 1) / block_size;
+
     fused_add_min_gelu_mul_kernel_ori<<<num_blocks, block_size, 0, stream>>>(
         reinterpret_cast<const float*>(input),
         reinterpret_cast<float*>(output),
         add_value,
         multiply_value,
-        in_elems
+        size
     );
 }

@@ -1,72 +1,55 @@
 #include <cuda_runtime.h>
-#include <cuda_fp16.h>
-#include <cstdint>
 #include <cmath>
 
-template<typename T>
-__global__ void l1_normalize_kernel_ori(
-    const T* input,
-    T* output,
-    const int batch_size,
-    const int dim,
-    const float epsilon
-) {
-    const int batch_idx = blockIdx.x;
-    const int tid = threadIdx.x;
-    const int stride = blockDim.x;
+
+
+
+__global__ void l1_norm_kernel_ori(const float* __restrict__ x, 
+                                float* __restrict__ out, 
+                                int batch_size, 
+                                int dim) {
+    int row = blockIdx.x;
+    if (row >= batch_size) return;
     
-    // Shared memory for reduction
-    extern __shared__ float sdata[];
+    const float* x_row = x + row * dim;
+    float* out_row = out + row * dim;
     
-    // Each thread computes partial sum
-    float thread_sum = 0.0f;
-    for (int i = tid; i < dim; i += stride) {
-        thread_sum += fabsf(static_cast<float>(input[batch_idx * dim + i]));
+    // Phase 1: Compute sum of absolute values using all threads
+    float local_sum = 0.0f;
+    for (int i = threadIdx.x; i < dim; i += blockDim.x) {
+        local_sum += fabsf(x_row[i]);
     }
-    sdata[tid] = thread_sum;
+    
+    // Reduce within warp
+    local_sum = warp_reduce_sum(local_sum);
+    
+    // Shared memory for block-level reduction
+    __shared__ float warp_sums[32];
+    int lane = threadIdx.x % 32;
+    int warp_id = threadIdx.x / 32;
+    
+    if (lane == 0) {
+        warp_sums[warp_id] = local_sum;
+    }
     __syncthreads();
     
-    // Parallel reduction in shared memory
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) {
-            sdata[tid] += sdata[tid + s];
-        }
-        __syncthreads();
+    // Final reduction by first warp
+    if (warp_id == 0) {
+        local_sum = (threadIdx.x < (blockDim.x + 31) / 32) ? warp_sums[lane] : 0.0f;
+        local_sum = warp_reduce_sum(local_sum);
     }
     
-    // Compute mean and normalize
-    if (tid == 0) {
-        float mean_val = sdata[0] / dim + epsilon;
-        for (int i = 0; i < dim; i += stride) {
-            int idx = batch_idx * dim + i;
-            output[idx] = static_cast<T>(static_cast<float>(input[idx]) / mean_val);
-        }
+    // Broadcast the mean to all threads
+    __shared__ float mean_val;
+    if (threadIdx.x == 0) {
+        mean_val = local_sum / dim;
     }
-}
-
-template<typename T>
-__global__ void l1_normalize_kernel_small_ori(
-    const T* input,
-    T* output,
-    const int batch_size,
-    const int dim,
-    const float epsilon
-) {
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    const int batch_idx = idx / dim;
-    const int elem_idx = idx % dim;
+    __syncthreads();
     
-    if (batch_idx < batch_size && elem_idx < dim) {
-        // Compute mean for this batch using warp shuffle
-        float thread_val = fabsf(static_cast<float>(input[idx]));
-        
-        // Warp reduction for mean
-        for (int offset = 16; offset > 0; offset /= 2) {
-            thread_val += __shfl_down_sync(0xffffffff, thread_val, offset);
-        }
-        
-        float mean_val = __shfl_sync(0xffffffff, thread_val, 0) / dim + epsilon;
-        output[idx] = static_cast<T>(static_cast<float>(input[idx]) / mean_val);
+    // Phase 2: Divide by mean
+    float mean_inv = 1.0f / mean_val;
+    for (int i = threadIdx.x; i < dim; i += blockDim.x) {
+        out_row[i] = x_row[i] * mean_inv;
     }
 }
 
@@ -76,39 +59,18 @@ void test_tmp_kernel_ori(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream
-) {
-    // Extract parameters from the input shape
-    const int batch_size = in_batch;
-    const int dim = in_elems / batch_size;  // Assuming in_elems = batch_size * dim
-    
-    const float epsilon = 1e-8f;
-    
-    // Choose kernel based on dimension size
-    if (dim <= 1024) {
-        // Use warp-level reduction kernel for smaller dimensions
-        const int threads_per_block = 256;
-        const int total_elements = batch_size * dim;
-        const int num_blocks = (total_elements + threads_per_block - 1) / threads_per_block;
-        
-        l1_normalize_kernel_small_ori<T><<<num_blocks, threads_per_block, 0, stream>>>(
-            input,
-            output,
-            batch_size,
-            dim,
-            epsilon
-        );
-    } else {
-        // Use shared memory reduction kernel for larger dimensions
-        const int threads_per_block = 256;
-        const int shared_mem_size = threads_per_block * sizeof(float);
-        
-        l1_normalize_kernel_ori<T><<<batch_size, threads_per_block, shared_mem_size, stream>>>(
-            input,
-            output,
-            batch_size,
-            dim,
-            epsilon
-        );
-    }
+    cudaStream_t stream)
+{
+    int batch_size = in_batch;
+    int dim = in_elems / in_batch;
+
+    const int threads = 256;
+    const int blocks = batch_size;
+
+    l1_norm_kernel_ori<<<blocks, threads, 0, stream>>>(
+        reinterpret_cast<const float*>(input),
+        reinterpret_cast<float*>(output),
+        batch_size,
+        dim
+    );
 }

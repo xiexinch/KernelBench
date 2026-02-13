@@ -1,9 +1,8 @@
 #include <cuda_runtime.h>
-#include <vector>
-#include <math.h>
+#include <algorithm>
 
-__device__ __forceinline__ float hardswish(float x) {
-    return x * fminf(fmaxf(x + 3.0f, 0.0f), 6.0f) / 6.0f;
+__device__ float hardswish(float x) {
+    return x * fminf(fmaxf(0.0f, x + 3.0f), 6.0f) / 6.0f;
 }
 
 __global__ void fused_hardswish_groupnorm_meanpool_kernel_ori(
@@ -75,46 +74,52 @@ void test_tmp_kernel_ori(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream
-) {
-    // Cast to float (kernel is float-specific)
-    float* d_input = reinterpret_cast<float*>(input);
-    float* d_output = reinterpret_cast<float*>(output);
-    
-    const int batch_size = in_batch;
-    const int channels = in_channels;
-    const int spatial_size = in_height * in_width;
-    const int num_groups = (channels >= 4) ? 4 : 1;  // Default from original, ensure valid
-    const float eps = 1e-5f;
-    
+    cudaStream_t stream)
+{
+    int batch_size = in_batch;
+    int channels = in_channels;
+    int spatial_size = in_elems / (in_batch * in_channels);
+    int num_groups = 4;
+    float eps = 1e-5f;
+
     // Allocate and initialize weight and bias on device
-    float *d_weight = nullptr, *d_bias = nullptr;
+    float* d_weight = nullptr;
+    float* d_bias = nullptr;
     cudaMallocAsync(&d_weight, channels * sizeof(float), stream);
     cudaMallocAsync(&d_bias, channels * sizeof(float), stream);
-    
-    // Initialize weight to 1.0 and bias to 0.0
-    std::vector<float> h_weight(channels, 1.0f);
-    std::vector<float> h_bias(channels, 0.0f);
-    cudaMemcpyAsync(d_weight, h_weight.data(), channels * sizeof(float), cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_bias, h_bias.data(), channels * sizeof(float), cudaMemcpyHostToDevice, stream);
-    
+
+    // Initialize host buffers
+    float* h_weight = new float[channels];
+    float* h_bias = new float[channels];
+    for (int i = 0; i < channels; ++i) {
+        h_weight[i] = 1.0f;
+        h_bias[i] = 0.0f;
+    }
+
+    // Copy to device
+    cudaMemcpyAsync(d_weight, h_weight, channels * sizeof(float), cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_bias, h_bias, channels * sizeof(float), cudaMemcpyHostToDevice, stream);
+
+    // Launch kernel
     dim3 grid(batch_size);
     dim3 block(channels);
     size_t shared_mem_size = 2 * num_groups * sizeof(float);
-    
+
     fused_hardswish_groupnorm_meanpool_kernel_ori<<<grid, block, shared_mem_size, stream>>>(
-        d_input,
+        reinterpret_cast<const float*>(input),
         d_weight,
         d_bias,
-        d_output,
+        reinterpret_cast<float*>(output),
         batch_size,
         channels,
         spatial_size,
         num_groups,
         eps
     );
-    
-    // Cleanup allocations
+
+    // Cleanup
     cudaFreeAsync(d_weight, stream);
     cudaFreeAsync(d_bias, stream);
+    delete[] h_weight;
+    delete[] h_bias;
 }

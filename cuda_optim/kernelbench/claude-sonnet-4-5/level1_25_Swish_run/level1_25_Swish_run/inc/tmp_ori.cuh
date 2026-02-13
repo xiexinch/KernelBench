@@ -17,6 +17,6 @@ void test_tmp_kernel_opt(
 {
     int size = in_elems;
     const int block_size = 256;
-    const int num_blocks = (size + block_size - 1) / block_size;
-    swish_kernel_opt<<<num_blocks, block_size>>>(input, output, size);
+    int num_blocks = (size + block_size - 1) / block_size;
+    swish_kernel_opt<<<num_blocks, block_size, 0, stream>>>(input, output, size);
 }

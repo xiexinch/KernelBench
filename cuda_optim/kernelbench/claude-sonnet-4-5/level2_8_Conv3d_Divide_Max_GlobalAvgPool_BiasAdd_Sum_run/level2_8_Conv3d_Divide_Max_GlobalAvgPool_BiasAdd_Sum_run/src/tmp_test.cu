@@ -36,9 +36,8 @@ ResultStruct test_tmp(std::vector<int> input_size, std::vector<int> output_size)
 
     output_cpu = (T *)malloc(sizeof(T) * out_elems);
     output_target_cpu = (T *)malloc(sizeof(T) * out_elems);
-    int total_input_elems = in_elems + 64;
-    input_cpu = (T *)malloc(sizeof(T) * total_input_elems);
-    cudaMalloc((void **)&input, sizeof(T) * total_input_elems);
+    input_cpu = (T *)malloc(sizeof(T) * in_elems);
+    cudaMalloc((void **)&input, sizeof(T) * in_elems);
     cudaMalloc((void **)&output, sizeof(T) * out_elems);
     cudaMalloc((void **)&output_target, sizeof(T) * out_elems);
     memset(output_cpu, 1, sizeof(T) * out_elems);
@@ -47,8 +46,7 @@ ResultStruct test_tmp(std::vector<int> input_size, std::vector<int> output_size)
     cudaMemset(output_target, 2, sizeof(T) * out_elems);
 
     for(int i = 0; i < in_elems; i++) { input_cpu[i] = (i*7)%127; }
-    for(int i = in_elems; i < total_input_elems; i++) { input_cpu[i] = (i % 127) * 0.01f; }
-    cudaMemcpy(input, input_cpu, sizeof(T) * (in_elems + 64), cudaMemcpyHostToDevice);
+    cudaMemcpy(input, input_cpu, sizeof(T) * in_elems, cudaMemcpyHostToDevice);
 
     float total_time = 0.0;
     int test_count = 1000;

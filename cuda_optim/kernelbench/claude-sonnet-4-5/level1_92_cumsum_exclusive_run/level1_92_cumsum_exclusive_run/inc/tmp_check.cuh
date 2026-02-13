@@ -24,16 +24,21 @@ void test_tmp_kernel_ori(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
-    int64_t outer_size = in_batch;
-    int64_t dim_size = in_height;
-    int64_t inner_size = in_channels * in_width;
-    
+    // For this kernel, we assume the cumsum is applied along the last dimension (dim = -1 or equivalent)
+    // Based on the original logic, we need to compute outer_size, inner_size, and dim_size
+    // Since the original code uses a generic dim, but our interface doesn't pass it,
+    // we infer from the shape: assume cumsum is along the innermost dimension (width)
+
+    int outer_size = in_batch * in_height * in_channels;
+    int inner_size = 1;
+    int dim_size = in_width;
+
     const int threads = 256;
     const int blocks = (outer_size * inner_size + threads - 1) / threads;
-    
+
     exclusive_cumsum_kernel_ori<<<blocks, threads, 0, stream>>>(
-        input,
-        output,
+        reinterpret_cast<const float*>(input),
+        reinterpret_cast<float*>(output),
         outer_size,
         dim_size,
         inner_size

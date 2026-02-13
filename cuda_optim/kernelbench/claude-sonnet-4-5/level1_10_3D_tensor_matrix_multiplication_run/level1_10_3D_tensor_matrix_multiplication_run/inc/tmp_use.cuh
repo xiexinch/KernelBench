@@ -56,20 +56,24 @@ void test_tmp_kernel_opt(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
+    // Map input tensor A: shape (N, M, K) -> (in_batch, in_height, in_channels)
+    // Map matrix B: shape (K, L) -> (in_width, out_width) where in_width == K
+    // Output C: shape (N, M, L) -> (out_batch, out_height, out_width)
+
     int N = in_batch;
     int M = in_height;
     int K = in_channels;
     int L = out_width;
-    
+
     dim3 threads(TILE_SIZE, TILE_SIZE);
-    dim3 blocks((L + TILE_SIZE - 1) / TILE_SIZE, 
+    dim3 blocks((L + TILE_SIZE - 1) / TILE_SIZE,
                 (M + TILE_SIZE - 1) / TILE_SIZE,
                 N);
-    
+
     batched_matmul_kernel_opt<<<blocks, threads, 0, stream>>>(
-        input,
-        input + in_elems,
-        output,
+        reinterpret_cast<const float*>(input),
+        reinterpret_cast<const float*>(input + in_batch * in_height * in_channels), // B starts after A
+        reinterpret_cast<float*>(output),
         N, M, K, L
     );
 }

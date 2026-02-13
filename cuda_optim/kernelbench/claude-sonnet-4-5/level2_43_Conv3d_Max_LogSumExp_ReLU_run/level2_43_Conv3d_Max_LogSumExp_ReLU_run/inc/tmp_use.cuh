@@ -1,5 +1,6 @@
 #include <cuda_runtime.h>
-#include <float.h>
+#include <cmath>
+#include <cfloat>
 
 __global__ void fused_maxpool_logsumexp_relu_kernel_opt(
     const float* input,
@@ -99,39 +100,27 @@ void test_tmp_kernel_opt(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream
-) {
-    // Map wrapper dimensions (4D) to kernel dimensions (5D)
-    // Wrapper layout: N, H, C, W interpreted as Batch, Depth, Channels, Height
-    // Width is calculated from total elements
-    
+    cudaStream_t stream)
+{
     int batch_size = in_batch;
     int channels = in_channels;
-    int in_depth = in_height;      // wrapper's height is depth
-    int in_height_true = in_width; // wrapper's width is height
-    // Calculate width from total elements: N * C * D * H * W = in_elems
-    int in_width_true = in_elems / (in_batch * in_channels * in_height * in_width);
-    
-    // Output dimensions (kernel_size=2, stride=2)
-    int out_depth = in_depth / 2;
-    int out_height_true = in_height_true / 2;
-    int out_width_true = in_width_true / 2;
-    
-    int total_out = batch_size * out_depth * out_height_true * out_width_true;
-    
+    int in_depth = in_elems / (in_batch * in_channels * in_height * in_width);
+    int out_depth = out_elems / (out_batch * out_height * out_width); // out_channels is 1
+
     const int block_size = 256;
-    const int num_blocks = (total_out + block_size - 1) / block_size;
-    
+    int total_out = out_batch * out_depth * out_height * out_width;
+    int num_blocks = (total_out + block_size - 1) / block_size;
+
     fused_maxpool_logsumexp_relu_kernel_opt<<<num_blocks, block_size, 0, stream>>>(
         reinterpret_cast<const float*>(input),
         reinterpret_cast<float*>(output),
         batch_size,
         channels,
         in_depth,
-        in_height_true,
-        in_width_true,
+        in_height,
+        in_width,
         out_depth,
-        out_height_true,
-        out_width_true
+        out_height,
+        out_width
     );
 }

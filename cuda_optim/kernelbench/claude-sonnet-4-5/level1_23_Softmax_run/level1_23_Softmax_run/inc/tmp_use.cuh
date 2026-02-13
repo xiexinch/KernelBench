@@ -1,70 +1,80 @@
 #include <cuda_runtime.h>
-#include <cfloat>
-#include <cmath>
+#include <float.h>
+#include <math.h>
 
-template <typename scalar_t>
-__global__ void softmax_forward_kernel_opt(
-    const scalar_t* input,
-    scalar_t* output,
-    const int batch_size,
-    const int num_features,
-    const int stride) {
+
+
+
+__global__ void softmax_kernel_opt(const float* __restrict__ x, float* __restrict__ out, int batch_size, int dim) {
+    int row = blockIdx.x;
+    if (row >= batch_size) return;
     
-    extern __shared__ float shared_mem[];
-    float* max_vals = shared_mem;
-    float* sum_vals = &shared_mem[blockDim.x];
+    const float* x_row = x + row * dim;
+    float* out_row = out + row * dim;
     
-    const int batch_idx = blockIdx.x;
-    const int tid = threadIdx.x;
+    int tid = threadIdx.x;
+    int lane = tid % 32;
+    int wid = tid / 32;
     
-    // Find maximum value in the row (online)
-    float thread_max = -INFINITY;
-    for (int i = tid; i < num_features; i += blockDim.x) {
-        float val = static_cast<float>(input[batch_idx * stride + i]);
-        thread_max = fmaxf(thread_max, val);
+    // Shared memory for warp-level reductions
+    __shared__ float shared_max[32];
+    __shared__ float shared_sum[32];
+    
+    // Find maximum value
+    float thread_max = -FLT_MAX;
+    for (int i = tid; i < dim; i += blockDim.x) {
+        thread_max = fmaxf(thread_max, x_row[i]);
     }
     
-    // Reduce to find global max
-    max_vals[tid] = thread_max;
-    __syncthreads();
-    
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) {
-            max_vals[tid] = fmaxf(max_vals[tid], max_vals[tid + s]);
-        }
-        __syncthreads();
+    float warp_max = warp_reduce_max(thread_max);
+    if (lane == 0) {
+        shared_max[wid] = warp_max;
     }
-    
-    const float row_max = max_vals[0];
     __syncthreads();
     
-    // Compute exponentials and sum (online)
+    // Final reduction across warps
+    float row_max = -FLT_MAX;
+    if (tid < 32) {
+        row_max = (tid < (blockDim.x + 31) / 32) ? shared_max[tid] : -FLT_MAX;
+        row_max = warp_reduce_max(row_max);
+    }
+    __syncthreads();
+    if (tid == 0) {
+        shared_max[0] = row_max;
+    }
+    __syncthreads();
+    row_max = shared_max[0];
+    
+    // Compute exp(x - max) and sum
     float thread_sum = 0.0f;
-    for (int i = tid; i < num_features; i += blockDim.x) {
-        float val = static_cast<float>(input[batch_idx * stride + i]);
-        float exp_val = expf(val - row_max);
-        output[batch_idx * stride + i] = static_cast<scalar_t>(exp_val);
-        thread_sum += exp_val;
+    for (int i = tid; i < dim; i += blockDim.x) {
+        float val = expf(x_row[i] - row_max);
+        out_row[i] = val;
+        thread_sum += val;
     }
     
-    // Reduce to find global sum
-    sum_vals[tid] = thread_sum;
+    float warp_sum = warp_reduce_sum(thread_sum);
+    if (lane == 0) {
+        shared_sum[wid] = warp_sum;
+    }
     __syncthreads();
     
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) {
-            sum_vals[tid] += sum_vals[tid + s];
-        }
-        __syncthreads();
+    // Final reduction across warps
+    float row_sum = 0.0f;
+    if (tid < 32) {
+        row_sum = (tid < (blockDim.x + 31) / 32) ? shared_sum[tid] : 0.0f;
+        row_sum = warp_reduce_sum(row_sum);
     }
+    __syncthreads();
+    if (tid == 0) {
+        shared_sum[0] = row_sum;
+    }
+    __syncthreads();
+    row_sum = shared_sum[0];
     
-    const float row_sum = sum_vals[0];
-    const float inv_sum = 1.0f / row_sum;
-    
-    // Normalize by sum
-    for (int i = tid; i < num_features; i += blockDim.x) {
-        float val = static_cast<float>(output[batch_idx * stride + i]);
-        output[batch_idx * stride + i] = static_cast<scalar_t>(val * inv_sum);
+    // Normalize
+    for (int i = tid; i < dim; i += blockDim.x) {
+        out_row[i] = out_row[i] / row_sum;
     }
 }
 
@@ -74,24 +84,18 @@ void test_tmp_kernel_opt(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream) {
-    
-    // Extract parameters from the input dimensions
-    const int batch_size = in_batch;
-    const int num_features = in_channels;  // Assuming channels dimension is the feature dimension
-    const int stride = in_channels;  // Assuming contiguous layout
-    
-    // Optimize thread block size based on problem dimensions
-    const int threads_per_block = 256;
-    const int shared_mem_size = 2 * threads_per_block * sizeof(float);
-    
-    dim3 grid(batch_size);
-    dim3 block(threads_per_block);
-    
-    softmax_forward_kernel_opt<T><<<grid, block, shared_mem_size, stream>>>(
-        input,
-        output,
+    cudaStream_t stream)
+{
+    int batch_size = in_batch;
+    int dim = in_elems / in_batch;
+
+    const int threads = 256;
+    const int blocks = batch_size;
+
+    softmax_kernel_opt<<<blocks, threads, 0, stream>>>(
+        reinterpret_cast<const float*>(input),
+        reinterpret_cast<float*>(output),
         batch_size,
-        num_features,
-        stride);
+        dim
+    );
 }

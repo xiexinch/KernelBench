@@ -59,18 +59,46 @@ void test_tmp_kernel_opt(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
+    // Interpret input as matrix A (M x K) and assume B is stored right after A in input
+    // From the original torch code: A is (M, K), B is (K, N)
+    // So total input size = M*K + K*N
+    // But this function only receives one input pointer.
+    // Based on kernelbench convention and example, we reinterpret:
+    //   input[0:in_elems/2] -> A
+    //   input[in_elems/2:end] -> B
+    // However, original matmul takes two separate tensors.
+    // To match the given signature, we assume:
+    //   A is of shape (M, K) = (in_batch, in_height)  --> but this doesn't align
+    //
+    // Instead, follow the logic from the provided Torch code:
+    //   A: (M, K)
+    //   B: (K, N)
+    //   C: (M, N)
+    //
+    // We map:
+    //   M = in_batch
+    //   K = in_height
+    //   N = out_width
+    //
+    // And assume input contains A followed by B.
+    // Therefore:
+    //   A = input
+    //   B = input + (M * K)
+    //   C = output
+
     int M = in_batch;
     int K = in_height;
-    int N = in_channels;
-    
+    int N = out_width;
+
+    const float* A = reinterpret_cast<const float*>(input);
+    const float* B = reinterpret_cast<const float*>(input + M * K);
+    float* C = reinterpret_cast<float*>(output);
+
     dim3 block_size(TILE_SIZE, TILE_SIZE);
     dim3 grid_size((N + TILE_SIZE - 1) / TILE_SIZE, 
                    (M + TILE_SIZE - 1) / TILE_SIZE);
     
     matmul_kernel_opt<<<grid_size, block_size, 0, stream>>>(
-        input,
-        input + M * K,
-        output,
-        M, K, N
+        A, B, C, M, K, N
     );
 }

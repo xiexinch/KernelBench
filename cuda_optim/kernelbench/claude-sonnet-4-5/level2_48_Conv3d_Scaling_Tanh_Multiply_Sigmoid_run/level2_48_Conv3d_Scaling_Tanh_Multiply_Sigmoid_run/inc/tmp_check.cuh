@@ -1,7 +1,3 @@
-#include <cuda_runtime.h>
-#include <math.h>
-#include <type_traits>
-
 __global__ void fused_ops_kernel_ori(
     const float* input,
     const float* scaling_factor,
@@ -29,54 +25,28 @@ void test_tmp_kernel_ori(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream
-) {
-    static_assert(std::is_same<T, float>::value, "This kernel only supports float type");
-    
-    const float* input_f = static_cast<const float*>(input);
-    float* output_f = static_cast<float*>(output);
-    
-    // Map 4D dimensions to original 5D logic:
-    // Original expects: batch, channels, depth, height, width
-    // We treat: in_batch -> batch, in_channels -> channels, 
-    // in_height * in_width -> spatial_size (depth * height * width)
-    int batch = in_batch;
-    int channels = in_channels;
-    int spatial_size = in_height * in_width;
+    cudaStream_t stream)
+{
     int size = in_elems;
-    
-    // Allocate temporary scaling_factor and bias arrays
-    // Since the signature doesn't provide them, we allocate and initialize to 1.0f
-    float *d_scaling_factor, *d_bias;
-    cudaMalloc(&d_scaling_factor, channels * sizeof(float));
-    cudaMalloc(&d_bias, channels * sizeof(float));
-    
-    // Initialize with 1.0f using host-side fill and async copy
-    float* h_scaling_factor = new float[channels];
-    float* h_bias = new float[channels];
-    for (int i = 0; i < channels; ++i) {
-        h_scaling_factor[i] = 1.0f;
-        h_bias[i] = 1.0f;
-    }
-    cudaMemcpyAsync(d_scaling_factor, h_scaling_factor, channels * sizeof(float), cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_bias, h_bias, channels * sizeof(float), cudaMemcpyHostToDevice, stream);
-    delete[] h_scaling_factor;
-    delete[] h_bias;
-    
+    // Assuming input is 5D: [batch, channels, depth, height, width]
+    // From the original code: spatial_size = shape[2] * shape[3] * shape[4]
+    // So we need to infer depth from total elements:
+    // in_elems = in_batch * in_channels * depth * in_height * in_width
+    // But the function signature doesn't provide depth explicitly.
+    // However, from the original usage, we know:
+    //   out_channels = in_channels (after conv, but here passed as argument)
+    //   spatial_size = in_elems / (in_batch * out_channels)
+    int spatial_size = in_elems / (in_batch * out_channels);
+
     const int block_size = 256;
-    const int num_blocks = (size + block_size - 1) / block_size;
-    
+    int num_blocks = (size + block_size - 1) / block_size;
     fused_ops_kernel_ori<<<num_blocks, block_size, 0, stream>>>(
-        input_f,
-        d_scaling_factor,
-        d_bias,
-        output_f,
+        reinterpret_cast<const float*>(input),
+        reinterpret_cast<const float*>(input + in_elems),      // scaling_factor assumed right after input
+        reinterpret_cast<const float*>(input + in_elems + out_channels), // bias assumed right after scaling_factor
+        reinterpret_cast<float*>(output),
         size,
-        channels,
+        out_channels,
         spatial_size
     );
-    
-    // Cleanup
-    cudaFree(d_scaling_factor);
-    cudaFree(d_bias);
 }

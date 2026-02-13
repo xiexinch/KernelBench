@@ -1,6 +1,3 @@
-#include <cuda_runtime.h>
-#include <math.h>
-
 __global__ void fused_linear_maxpool_kernel_ori(
     const float* input,
     const float* weight,
@@ -64,48 +61,51 @@ void test_tmp_kernel_ori(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream
-) {
-    // Cast to float since original kernels operate on float
-    float* input_f = reinterpret_cast<float*>(input);
-    float* output_f = reinterpret_cast<float*>(output);
-    
-    // Map dimensions to original kernel parameters
-    int batch_size = in_batch;
-    int in_features = in_channels * in_height * in_width;
-    int out_features_after_maxpool = out_channels * out_height * out_width;
-    int out_features_linear = out_features_after_maxpool * 2;
-    
-    // Assume input layout: [input_data, weight, bias]
-    // input_data: batch_size * in_features
-    // weight: out_features_linear * in_features  
-    // bias: out_features_linear
-    float* input_data = input_f;
-    float* weight = input_f + batch_size * in_features;
-    float* bias = weight + out_features_linear * in_features;
-    
-    // Allocate intermediate buffer for maxpool output
-    float* intermediate;
-    cudaMallocAsync(&intermediate, batch_size * out_features_after_maxpool * sizeof(float), stream);
-    
-    // Launch fused linear + maxpool kernel
-    const int threads1 = 256;
-    const int blocks_x = (out_features_after_maxpool + threads1 - 1) / threads1;
-    dim3 blocks(blocks_x, batch_size);
-    
-    fused_linear_maxpool_kernel_ori<<<blocks, threads1, 0, stream>>>(
-        input_data, weight, bias, intermediate,
-        batch_size, in_features, out_features_linear
-    );
-    
-    // Launch fused sum + scale kernel
-    const int threads2 = 256;
-    const int blocks2 = (batch_size + threads2 - 1) / threads2;
-    float scale_factor = 0.5f;  // Original scale factor from model
-    
-    fused_sum_scale_kernel_ori<<<blocks2, threads2, 0, stream>>>(
-        intermediate, output_f, batch_size, out_features_after_maxpool, scale_factor
-    );
-    
-    cudaFreeAsync(intermediate, stream);
+    cudaStream_t stream)
+{
+    // Determine which kernel to launch based on tensor shapes
+    // Case 1: fused_linear_maxpool (input: [B, in_features], output: [B, out_features/2])
+    if (in_height == 1 && in_width == 1 && out_height == 1 && out_width == 1 &&
+        in_batch == out_batch && in_elems == in_batch * in_channels &&
+        out_elems == out_batch * out_channels) {
+        int batch_size = in_batch;
+        int in_features = in_channels;
+        int out_features = out_channels * 2;
+
+        const float* weight = reinterpret_cast<const float*>(input + in_elems);
+        const float* bias = reinterpret_cast<const float*>(input + in_elems + out_features * in_features);
+
+        const int threads = 256;
+        const int blocks_x = (out_features / 2 + threads - 1) / threads;
+        dim3 blocks(blocks_x, batch_size);
+
+        fused_linear_maxpool_kernel_ori<<<blocks, threads, 0, stream>>>(
+            input,
+            weight,
+            bias,
+            output,
+            batch_size,
+            in_features,
+            out_features
+        );
+    }
+    // Case 2: fused_sum_scale (input: [B, features], output: [B])
+    else if (in_height == 1 && in_width == 1 && out_height == 1 && out_width == 1 &&
+             in_batch == out_batch && out_channels == 1 &&
+             in_elems == in_batch * in_channels && out_elems == out_batch) {
+        int batch_size = in_batch;
+        int features = in_channels;
+        float scale_factor = 0.5f; // fixed as per original code
+
+        const int threads = 256;
+        const int blocks = (batch_size + threads - 1) / threads;
+
+        fused_sum_scale_kernel_ori<<<blocks, threads, 0, stream>>>(
+            input,
+            output,
+            batch_size,
+            features,
+            scale_factor
+        );
+    }
 }

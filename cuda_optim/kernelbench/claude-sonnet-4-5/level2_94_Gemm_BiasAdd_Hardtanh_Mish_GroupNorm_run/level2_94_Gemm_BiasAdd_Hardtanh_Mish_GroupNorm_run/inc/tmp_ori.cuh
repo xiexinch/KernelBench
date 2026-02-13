@@ -1,15 +1,19 @@
 #include <cuda_runtime.h>
-#include <math.h>
+#include <cfloat>
 
-__device__ float hardtanh_activation(float x) {
-    const float min_val = -1.0f;
-    const float max_val = 1.0f;
-    return fmaxf(min_val, fminf(max_val, x));
+#ifndef HARDTANH_ACTIVATION_DEFINED
+#define HARDTANH_ACTIVATION_DEFINED
+__device__ inline float hardtanh_activation(float x) {
+    return fmaxf(-2.0f, fminf(2.0f, x));
 }
+#endif
 
-__device__ float mish_activation(float x) {
-    return x * tanhf(log1pf(expf(x)));
+#ifndef MISH_ACTIVATION_DEFINED
+#define MISH_ACTIVATION_DEFINED
+__device__ inline float mish_activation(float x) {
+    return x * tanhf(logf(1.0f + expf(x)));
 }
+#endif
 
 __global__ void fused_bias_hardtanh_mish_kernel_opt(
     const float* input,
@@ -36,24 +40,19 @@ void test_tmp_kernel_opt(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream)
-{
-    const float* input_f = static_cast<const float*>(input);
-    float* output_f = static_cast<float*>(output);
-    
-    // Assume bias is stored contiguously after input data
-    const float* bias_f = input_f + in_elems;
-    
+    cudaStream_t stream
+) {
     int batch_size = in_batch;
-    int features = in_width;
-    
+    int features = in_elems / in_batch;
     const int threads = 256;
     const int blocks = (in_elems + threads - 1) / threads;
-    
+
+    const float* bias = reinterpret_cast<const float*>(input) + in_elems;
+
     fused_bias_hardtanh_mish_kernel_opt<<<blocks, threads, 0, stream>>>(
-        input_f,
-        bias_f,
-        output_f,
+        reinterpret_cast<const float*>(input),
+        bias,
+        reinterpret_cast<float*>(output),
         batch_size,
         features
     );

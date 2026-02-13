@@ -82,14 +82,53 @@ void test_tmp_kernel_ori(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
-    // First kernel: scale_maxpool3d
-    int batch_size = in_batch;
-    int channels = in_channels;
-    int in_d = in_height;
-    int in_h = in_channels;
-    int in_w = in_width;
-    float scale = 0.5;
+    // Determine which kernel to launch based on output dimensions
+    // If output spatial dims are 1x1x1, assume global_avgpool_clamp
+    // Otherwise, assume scale_maxpool3d
+
+    const int block_size = 256;
+    float scale = 0.5f;
     int kernel_size = 2;
-    
-    int out_d = in_d / kernel_size;
-    int out_h = in_h /
+    float clamp_min = 0.0f;
+    float clamp_max = 1.0f;
+
+    // Extract 3D dimensions from given parameters
+    // Input: [batch, channels, D, H, W]
+    // Given: in_batch, in_channels, in_height=H, in_width=W
+    // We need to infer D from in_elems: in_elems = in_batch * in_channels * D * in_height * in_width
+    int in_d = (in_batch > 0 && in_channels > 0 && in_height > 0 && in_width > 0) 
+               ? (in_elems / (in_batch * in_channels * in_height * in_width)) : 1;
+    int in_h = in_height;
+    int in_w = in_width;
+
+    int out_d = (out_batch > 0 && out_channels > 0 && out_height > 0 && out_width > 0) 
+                ? (out_elems / (out_batch * out_channels * out_height * out_width)) : 1;
+    int out_h = out_height;
+    int out_w = out_width;
+
+    if (out_d == 1 && out_h == 1 && out_w == 1) {
+        // Launch global_avgpool_clamp_kernel_ori
+        int total_channels = out_batch * out_channels;
+        int num_blocks = (total_channels + block_size - 1) / block_size;
+        global_avgpool_clamp_kernel_ori<<<num_blocks, block_size, 0, stream>>>(
+            reinterpret_cast<const float*>(input),
+            reinterpret_cast<float*>(output),
+            out_batch, out_channels,
+            in_d, in_h, in_w,
+            clamp_min, clamp_max
+        );
+    } else {
+        // Launch scale_maxpool3d_kernel_ori
+        int total_elements = out_elems;
+        int num_blocks = (total_elements + block_size - 1) / block_size;
+        scale_maxpool3d_kernel_ori<<<num_blocks, block_size, 0, stream>>>(
+            reinterpret_cast<const float*>(input),
+            reinterpret_cast<float*>(output),
+            scale,
+            in_batch, in_channels,
+            in_d, in_h, in_w,
+            out_d, out_h, out_w,
+            kernel_size
+        );
+    }
+}

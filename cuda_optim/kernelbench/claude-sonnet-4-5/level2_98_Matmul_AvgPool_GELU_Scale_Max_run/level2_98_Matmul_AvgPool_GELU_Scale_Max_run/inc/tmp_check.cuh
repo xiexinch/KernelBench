@@ -3,8 +3,9 @@
 
 #define THREADS_PER_BLOCK 256
 
-// Note: gelu_activation function is assumed to be provided by the test framework
-// (defined in tmp_check.cuh or tmp_use.cuh)
+__device__ float gelu_activation(float x) {
+    return 0.5f * x * (1.0f + tanhf(0.7978845608028654f * (x + 0.044715f * x * x * x)));
+}
 
 __global__ void fused_avgpool_gelu_scale_max_kernel_ori(
     const float* __restrict__ input,
@@ -69,36 +70,20 @@ void test_tmp_kernel_ori(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream
-) {
+    cudaStream_t stream)
+{
     int batch_size = in_batch;
-    int out_features = in_height * in_channels * in_width;
-    
-    // Default hyperparameters
+    int out_features = in_elems / in_batch;
     int pool_kernel_size = 2;
     float scale_factor = 1.0f;
-    
-    // Ensure pool_kernel_size divides out_features evenly
-    if (pool_kernel_size <= 0 || out_features % pool_kernel_size != 0) {
-        pool_kernel_size = 1;
-    }
-    
+
     int shared_mem_size = THREADS_PER_BLOCK * sizeof(float);
-    
     fused_avgpool_gelu_scale_max_kernel_ori<<<batch_size, THREADS_PER_BLOCK, shared_mem_size, stream>>>(
-        (const float*)input,
-        (float*)output,
+        reinterpret_cast<const float*>(input),
+        reinterpret_cast<float*>(output),
         batch_size,
         out_features,
         pool_kernel_size,
         scale_factor
     );
 }
-
-template void test_tmp_kernel_ori<float>(
-    float* input, float* output,
-    int in_batch, int in_height, int in_channels, int in_width,
-    int out_batch, int out_height, int out_channels, int out_width,
-    int in_elems, int out_elems,
-    cudaStream_t stream
-);

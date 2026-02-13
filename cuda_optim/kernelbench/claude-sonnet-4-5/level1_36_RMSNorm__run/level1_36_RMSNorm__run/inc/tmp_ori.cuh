@@ -37,23 +37,25 @@ void test_tmp_kernel_opt(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
+    // Map input dimensions to kernel parameters
+    // Assuming layout: [batch_size, features, dim1, dim2]
     int batch_size = in_batch;
     int features = in_channels;
     int dim1 = in_height;
     int dim2 = in_width;
-    float eps = 1e-5;
-    
+    float eps = 1e-5f;
+
     int total_elements = batch_size * dim1 * dim2;
     const int block_size = 256;
-    const int num_blocks = (total_elements + block_size - 1) / block_size;
-    
+    int num_blocks = (total_elements + block_size - 1) / block_size;
+
     rmsnorm_kernel_opt<<<num_blocks, block_size, 0, stream>>>(
-        input, 
-        output, 
-        batch_size, 
-        features, 
-        dim1, 
-        dim2, 
+        reinterpret_cast<const float*>(input),
+        reinterpret_cast<float*>(output),
+        batch_size,
+        features,
+        dim1,
+        dim2,
         eps
     );
 }

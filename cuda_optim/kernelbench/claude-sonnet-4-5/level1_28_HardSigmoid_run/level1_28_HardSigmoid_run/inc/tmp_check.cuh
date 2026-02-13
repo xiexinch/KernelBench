@@ -16,8 +16,11 @@ void test_tmp_kernel_ori(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
-    int size = in_elems;
     const int block_size = 256;
-    const int num_blocks = (size + block_size - 1) / block_size;
-    hardsigmoid_kernel_ori<<<num_blocks, block_size>>>(input, output, size);
+    int num_blocks = (in_elems + block_size - 1) / block_size;
+    hardsigmoid_kernel_ori<<<num_blocks, block_size, 0, stream>>>(
+        reinterpret_cast<const float*>(input),
+        reinterpret_cast<float*>(output),
+        in_elems
+    );
 }

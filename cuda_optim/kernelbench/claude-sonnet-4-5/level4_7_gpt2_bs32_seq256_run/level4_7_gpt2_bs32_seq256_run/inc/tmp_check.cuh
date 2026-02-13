@@ -1,3 +1,6 @@
+#include <cuda_runtime.h>
+#include <cmath>
+
 __global__ void gelu_kernel_ori(const float* input, float* output, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
@@ -65,8 +68,12 @@ void test_tmp_kernel_ori(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
-    int size = in_elems;
     const int block_size = 256;
-    int num_blocks = (size + block_size - 1) / block_size;
-    gelu_kernel_ori<<<num_blocks, block_size, 0, stream>>>(input, output, size);
+    int size = in_elems;
+    
+    gelu_kernel_ori<<<(size + block_size - 1) / block_size, block_size, 0, stream>>>(
+        reinterpret_cast<const float*>(input),
+        reinterpret_cast<float*>(output),
+        size
+    );
 }

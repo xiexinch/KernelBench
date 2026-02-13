@@ -1,15 +1,11 @@
-#include <cuda_runtime.h>
-#include <cuda_fp16.h>
-
-template <typename T>
-__global__ void fused_bias_relu_div_kernel_ori(T* data, const T* bias, T divisor, int batch_size, int out_features) {
+__global__ void fused_bias_relu_div_kernel_ori(float* data, const float* bias, float divisor, int batch_size, int out_features) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total_size = batch_size * out_features;
     
     if (idx < total_size) {
         int col = idx % out_features;
-        T val = data[idx] + bias[col];
-        val = val > static_cast<T>(0.0f) ? val : static_cast<T>(0.0f);  // ReLU
+        float val = data[idx] + bias[col];
+        val = val > 0.0f ? val : 0.0f;  // ReLU
         data[idx] = val / divisor;
     }
 }
@@ -20,25 +16,25 @@ void test_tmp_kernel_ori(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream
-) {
-    // Map output dimensions to linear layer dimensions
-    // batch_size = out_batch
-    // out_features = out_height * out_channels * out_width
+    cudaStream_t stream)
+{
+    // Interpret inputs as matrix multiplication result: input = x @ weight.T
+    // So input is of shape [in_batch, out_features], which maps to [out_batch, out_channels]
     int batch_size = out_batch;
-    int out_features = out_height * out_channels * out_width;
-    int total_size = out_elems;
-    
+    int out_features = out_channels;
+    float divisor = 2.0f;  // Hardcoded based on example usage
+
     const int block_size = 256;
+    const int total_size = out_elems;
     const int num_blocks = (total_size + block_size - 1) / block_size;
-    
-    // input contains bias (size: out_features)
-    // output contains data (size: batch_size * out_features)
-    T divisor = static_cast<T>(2.0f);
-    
+
+    // Copy input to output first (simulate matmul result being written to output)
+    cudaMemcpyAsync(output, input, out_elems * sizeof(T), cudaMemcpyDeviceToDevice, stream);
+
+    // Launch fused kernel
     fused_bias_relu_div_kernel_ori<<<num_blocks, block_size, 0, stream>>>(
-        output,
-        input,
+        reinterpret_cast<float*>(output),
+        reinterpret_cast<const float*>(input + in_elems), // Assume bias follows input in memory
         divisor,
         batch_size,
         out_features

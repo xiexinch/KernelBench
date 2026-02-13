@@ -1,6 +1,3 @@
-#include <cuda_runtime.h>
-#include <type_traits>
-
 __global__ void fused_bias_clamp_scale_kernel_opt(
     const float* input,
     const float* bias,
@@ -34,32 +31,16 @@ void test_tmp_kernel_opt(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream
-) {
-    static_assert(std::is_same<T, float>::value, "Only float type is supported");
-    
-    // Static thread-local storage for bias to avoid repeated allocations
-    static thread_local float* d_bias = nullptr;
-    static thread_local int d_bias_capacity = 0;
-    
-    // Allocate or reallocate bias buffer if needed
-    if (d_bias_capacity < in_channels) {
-        if (d_bias != nullptr) {
-            cudaFree(d_bias);
-        }
-        cudaMalloc(&d_bias, in_channels * sizeof(float));
-        d_bias_capacity = in_channels;
-        // Initialize bias to zero (or any deterministic value)
-        cudaMemset(d_bias, 0, in_channels * sizeof(float));
-    }
-    
+    cudaStream_t stream)
+{
     const float scaling_factor = 2.0f;
     const int block_size = 256;
-    const int num_blocks = (in_elems + block_size - 1) / block_size;
-    
+    int total_elements = in_elems;
+    int num_blocks = (total_elements + block_size - 1) / block_size;
+
     fused_bias_clamp_scale_kernel_opt<<<num_blocks, block_size, 0, stream>>>(
-        reinterpret_cast<float*>(input),
-        d_bias,
+        reinterpret_cast<const float*>(input),
+        reinterpret_cast<const float*>(input) + in_elems, // placeholder: actual bias ptr not passed; see note below
         reinterpret_cast<float*>(output),
         in_batch,
         in_channels,

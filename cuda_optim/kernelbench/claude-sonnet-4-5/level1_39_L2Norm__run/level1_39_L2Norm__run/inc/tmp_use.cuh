@@ -50,11 +50,11 @@ void test_tmp_kernel_opt(
 {
     int batch_size = in_batch;
     int dim = in_elems / in_batch;
-    
-    int threads = 256;
-    int blocks = batch_size;
-    int shared_mem = threads * sizeof(float);
-    
+
+    const int threads = 256;
+    const int blocks = batch_size;
+    const int shared_mem = threads * sizeof(float);
+
     l2_norm_kernel_opt<<<blocks, threads, shared_mem, stream>>>(
         input,
         output,

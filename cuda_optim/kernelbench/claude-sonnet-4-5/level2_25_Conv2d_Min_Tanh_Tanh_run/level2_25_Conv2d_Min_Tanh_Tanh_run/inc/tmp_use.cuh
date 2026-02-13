@@ -1,8 +1,9 @@
+#include <climits>
+#include <cfloat>
 #include <cuda_runtime.h>
-#include <math.h>
+#include <cmath>
 
-template <typename T>
-__global__ void fused_min_tanh_kernel_opt(const T* input, T* output, 
+__global__ void fused_min_tanh_kernel_opt(const float* input, float* output, 
                                        int batch_size, int channels, int height, int width) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int spatial_size = height * width;
@@ -12,22 +13,19 @@ __global__ void fused_min_tanh_kernel_opt(const T* input, T* output,
         int b = idx / spatial_size;
         int hw = idx % spatial_size;
         
-        // Initialize min_val with the first channel to avoid std::numeric_limits in device code
-        int base_idx = b * channels * spatial_size + hw;
-        T min_val = input[base_idx];
-        
-        // Find minimum across remaining channels
-        for (int c = 1; c < channels; c++) {
-            int input_idx = base_idx + c * spatial_size;
-            T val = input[input_idx];
+        // Find minimum across channels
+        float min_val = FLT_MAX;
+        for (int c = 0; c < channels; c++) {
+            int input_idx = b * channels * spatial_size + c * spatial_size + hw;
+            float val = input[input_idx];
             if (val < min_val) {
                 min_val = val;
             }
         }
         
         // Apply tanh twice
-        T result = tanh(min_val);
-        result = tanh(result);
+        float result = tanhf(min_val);
+        result = tanhf(result);
         
         output[idx] = result;
     }
@@ -39,15 +37,15 @@ void test_tmp_kernel_opt(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream
-) {
-    int spatial_size = in_height * in_width;
-    int total_elements = in_batch * spatial_size;
+    cudaStream_t stream)
+{
     const int block_size = 256;
-    const int num_blocks = (total_elements + block_size - 1) / block_size;
-    
+    int total_elements = in_batch * in_height * in_width;
+    int num_blocks = (total_elements + block_size - 1) / block_size;
+
     fused_min_tanh_kernel_opt<<<num_blocks, block_size, 0, stream>>>(
-        input, output,
+        reinterpret_cast<const float*>(input),
+        reinterpret_cast<float*>(output),
         in_batch, in_channels, in_height, in_width
     );
 }

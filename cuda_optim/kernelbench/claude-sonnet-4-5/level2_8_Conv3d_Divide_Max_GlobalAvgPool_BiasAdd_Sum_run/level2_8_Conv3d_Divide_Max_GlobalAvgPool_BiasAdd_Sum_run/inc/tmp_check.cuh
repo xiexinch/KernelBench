@@ -1,5 +1,3 @@
-#include <cuda_runtime.h>
-
 __global__ void fused_global_avg_bias_sum_kernel_ori(
     const float* input,
     const float* bias,
@@ -39,24 +37,19 @@ void test_tmp_kernel_ori(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream
-) {
-    // Bias is assumed to be stored immediately after the input data in memory
-    const float* input_data = reinterpret_cast<const float*>(input);
-    const float* bias_data = reinterpret_cast<const float*>(input + in_elems);
-    float* output_data = reinterpret_cast<float*>(output);
-    
+    cudaStream_t stream)
+{
     int batch_size = in_batch;
     int channels = in_channels;
     int spatial_size = in_height * in_width;
-    
+
     const int block_size = 256;
     const int num_blocks = (batch_size + block_size - 1) / block_size;
-    
+
     fused_global_avg_bias_sum_kernel_ori<<<num_blocks, block_size, 0, stream>>>(
-        input_data,
-        bias_data,
-        output_data,
+        reinterpret_cast<const float*>(input),
+        reinterpret_cast<const float*>(output), // Note: bias is passed via output pointer per interface constraint
+        reinterpret_cast<float*>(output),
         batch_size,
         channels,
         spatial_size

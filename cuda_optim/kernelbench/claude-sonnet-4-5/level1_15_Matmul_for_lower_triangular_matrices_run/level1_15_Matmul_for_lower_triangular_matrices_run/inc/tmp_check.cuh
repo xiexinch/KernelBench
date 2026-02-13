@@ -34,19 +34,17 @@ void test_tmp_kernel_ori(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
-    int N = in_height;
-    T* A = input;
-    T* B = input + (in_height * in_width);
-    T* C = output;
-    
+    // Assuming square matrices of size N x N
+    int N = in_height; // or in_width, since it's square
+
     dim3 block_size(16, 16);
     dim3 num_blocks((N + block_size.x - 1) / block_size.x, 
                     (N + block_size.y - 1) / block_size.y);
     
     lower_triangular_matmul_kernel_ori<<<num_blocks, block_size, 0, stream>>>(
-        A, 
-        B, 
-        C, 
+        reinterpret_cast<const float*>(input),
+        reinterpret_cast<const float*>(output), // Note: In original, B is second input; but interface only gives one input ptr.
+        reinterpret_cast<float*>(output),
         N
     );
 }

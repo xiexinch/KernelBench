@@ -62,18 +62,45 @@ void test_tmp_kernel_opt(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
-    const int K = in_batch;
-    const int M = in_height;
-    const int N = out_height;
-    
+    // Interpret input layout: A is (K, M), B is (K, N)
+    // From original: A.size(0)=K, A.size(1)=M; B.size(1)=N
+    // So:
+    //   in_batch = K, in_height = M, in_channels = 1, in_width = 1  -> A
+    //   But since we have two inputs, we reinterpret:
+    //   We assume input = [A_data (K*M), B_data (K*N)]
+    //   Output = C (M*N)
+
+    // However, per the kernel interface, we need M, K, N
+    // From problem context:
+    //   A is (K, M) => total elems = K * M
+    //   B is (K, N) => total elems = K * N
+    //   C is (M, N) => total elems = M * N
+
+    // Given that in_elems = K*M + K*N, and out_elems = M*N
+    // We can deduce:
+    //   Let K = in_batch (from A's first dim)
+    //   Let M = in_height (from A's second dim)
+    //   Let N = out_width (from C's second dim)
+
+    // But to match original call:
+    //   M = out_batch (since C is M x N, and out_batch = M)
+    //   N = out_width
+    //   K = in_batch
+
+    int K = in_batch;
+    int M = out_batch;  // because C is (M, N)
+    int N = out_width;
+
+    // Input layout: first K*M elements are A, next K*N are B
+    const float* A = reinterpret_cast<const float*>(input);
+    const float* B = reinterpret_cast<const float*>(input + K * M);
+    float* C = reinterpret_cast<float*>(output);
+
     dim3 threadsPerBlock(TILE_SIZE, TILE_SIZE);
     dim3 numBlocks((N + TILE_SIZE - 1) / TILE_SIZE, 
                    (M + TILE_SIZE - 1) / TILE_SIZE);
     
     matmul_transpose_kernel_opt<<<numBlocks, threadsPerBlock, 0, stream>>>(
-        input,
-        input + in_batch * in_height,
-        output,
-        M, K, N
+        A, B, C, M, K, N
     );
 }

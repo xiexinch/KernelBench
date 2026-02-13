@@ -39,17 +39,19 @@ void test_tmp_kernel_ori(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
+    // Assume input layout: [M, K] -> in_batch=M, in_width=K (flattened as needed)
+    // Output layout: [M] -> out_batch=M
     int M = in_batch;
-    int K = in_height;
-    
+    int K = in_width;
+
     const int block_size = 256;
     const int num_blocks = M;
-    
+
     matvec_kernel_ori<<<num_blocks, block_size, 0, stream>>>(
-        input, 
-        input + M * K, 
-        output, 
-        M, 
+        reinterpret_cast<const float*>(input),
+        reinterpret_cast<const float*>(output + out_elems), // B is placed after output buffer
+        reinterpret_cast<float*>(output),
+        M,
         K
     );
 }

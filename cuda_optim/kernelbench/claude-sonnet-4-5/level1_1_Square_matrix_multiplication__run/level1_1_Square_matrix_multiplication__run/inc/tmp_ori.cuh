@@ -51,13 +51,21 @@ void test_tmp_kernel_opt(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
-    int N = in_height;
-    const float* A = input;
-    const float* B = input + (N * N);
-    float* C = output;
+    // Assume square matrix multiplication: input is [A, B], each of shape (N, N)
+    // So total input elements = 2 * N * N => N = sqrt(in_elems / 2)
+    int N = static_cast<int>(sqrtf(static_cast<float>(in_elems) / 2.0f));
+    
+    const T* A = input;
+    const T* B = input + N * N;
+    T* C = output;
     
     dim3 block_size(TILE_SIZE, TILE_SIZE);
     dim3 num_blocks((N + TILE_SIZE - 1) / TILE_SIZE, (N + TILE_SIZE - 1) / TILE_SIZE);
     
-    matmul_kernel_opt<<<num_blocks, block_size, 0, stream>>>(A, B, C, N);
+    matmul_kernel_opt<<<num_blocks, block_size, 0, stream>>>(
+        reinterpret_cast<const float*>(A),
+        reinterpret_cast<const float*>(B),
+        reinterpret_cast<float*>(C),
+        N
+    );
 }

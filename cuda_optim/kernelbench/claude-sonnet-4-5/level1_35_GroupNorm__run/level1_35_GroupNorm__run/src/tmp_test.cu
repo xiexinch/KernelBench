@@ -2,7 +2,6 @@
 #include <cuda_runtime.h>
 #include <iostream>
 #include <cstdlib>
-#include <vector>
 #include "common.h"
 #include "tmp_check.cuh"
 #include "tmp_use.cuh"
@@ -27,43 +26,27 @@ ResultStruct test_tmp(std::vector<int> input_size, std::vector<int> output_size)
     int out_width = output_size[3];
     int in_elems = in_batch * in_height * in_channels * in_width;
     int out_elems = out_batch * out_height * out_channels * out_width;
-    int num_groups = 8;
-    float eps = 1e-5f;
 
     T *input = nullptr;
     T *output = nullptr;
     T *output_target = nullptr;
-    T *gamma = nullptr;
-    T *beta = nullptr;
     T *input_cpu = nullptr;
     T *output_cpu = nullptr;
     T *output_target_cpu = nullptr;
-    T *gamma_cpu = nullptr;
-    T *beta_cpu = nullptr;
 
-    input_cpu = (T *)malloc(sizeof(T) * in_elems);
     output_cpu = (T *)malloc(sizeof(T) * out_elems);
     output_target_cpu = (T *)malloc(sizeof(T) * out_elems);
-    gamma_cpu = (T *)malloc(sizeof(T) * in_channels);
-    beta_cpu = (T *)malloc(sizeof(T) * in_channels);
-
-    cudaMalloc(&input, sizeof(T) * in_elems);
-    cudaMalloc(&output, sizeof(T) * out_elems);
-    cudaMalloc(&output_target, sizeof(T) * out_elems);
-    cudaMalloc(&gamma, sizeof(T) * in_channels);
-    cudaMalloc(&beta, sizeof(T) * in_channels);
-
+    input_cpu = (T *)malloc(sizeof(T) * in_elems);
+    cudaMalloc((void **)&input, sizeof(T) * in_elems);
+    cudaMalloc((void **)&output, sizeof(T) * out_elems);
+    cudaMalloc((void **)&output_target, sizeof(T) * out_elems);
     memset(output_cpu, 1, sizeof(T) * out_elems);
     memset(output_target_cpu, 2, sizeof(T) * out_elems);
     cudaMemset(output, 1, sizeof(T) * out_elems);
     cudaMemset(output_target, 2, sizeof(T) * out_elems);
 
-    for (int i = 0; i < in_elems; i++) { input_cpu[i] = (i*7)%127; }
-    for (int i = 0; i < in_channels; i++) { gamma_cpu[i] = 1.0f; beta_cpu[i] = 0.0f; }
-
+    for(int i = 0; i < in_elems; i++) { input_cpu[i] = (i*7)%127; }
     cudaMemcpy(input, input_cpu, sizeof(T) * in_elems, cudaMemcpyHostToDevice);
-    cudaMemcpy(gamma, gamma_cpu, sizeof(T) * in_channels, cudaMemcpyHostToDevice);
-    cudaMemcpy(beta, beta_cpu, sizeof(T) * in_channels, cudaMemcpyHostToDevice);
 
     float total_time = 0.0;
     int test_count = 1000;
@@ -71,10 +54,10 @@ ResultStruct test_tmp(std::vector<int> input_size, std::vector<int> output_size)
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
     for (int i = 0; i < 5; i++)
-        test_tmp_kernel_ori(input, output, in_batch, in_height, in_channels, in_width, out_batch, out_height, out_channels, out_width, in_elems, out_elems, stream, gamma, beta, num_groups, eps);
+        test_tmp_kernel_ori(input, output, in_batch, in_height, in_channels, in_width, out_batch, out_height, out_channels, out_width, in_elems, out_elems, stream);
     for (int i = 0; i < test_count; i++) {
         cudaEventRecord(start, 0);
-        test_tmp_kernel_ori(input, output, in_batch, in_height, in_channels, in_width, out_batch, out_height, out_channels, out_width, in_elems, out_elems, stream, gamma, beta, num_groups, eps);
+        test_tmp_kernel_ori(input, output, in_batch, in_height, in_channels, in_width, out_batch, out_height, out_channels, out_width, in_elems, out_elems, stream);
         cudaEventRecord(stop, 0);
         cudaEventSynchronize(stop);
         float t;
@@ -85,7 +68,7 @@ ResultStruct test_tmp(std::vector<int> input_size, std::vector<int> output_size)
     total_time = 0;
     for (int i = 0; i < test_count; i++) {
         cudaEventRecord(start, 0);
-        test_tmp_kernel_opt(input, output_target, in_batch, in_height, in_channels, in_width, out_batch, out_height, out_channels, out_width, in_elems, out_elems, stream, gamma, beta, num_groups, eps);
+        test_tmp_kernel_opt(input, output_target, in_batch, in_height, in_channels, in_width, out_batch, out_height, out_channels, out_width, in_elems, out_elems, stream);
         cudaEventRecord(stop, 0);
         cudaEventSynchronize(stop);
         float t;
@@ -102,18 +85,14 @@ ResultStruct test_tmp(std::vector<int> input_size, std::vector<int> output_size)
     free(input_cpu);
     free(output_cpu);
     free(output_target_cpu);
-    free(gamma_cpu);
-    free(beta_cpu);
     cudaFree(input);
     cudaFree(output);
     cudaFree(output_target);
-    cudaFree(gamma);
-    cudaFree(beta);
     return result;
 }
 
 int main() {
-    ResultStruct result1 = test_tmp<float>({16,64,16,64}, {16,64,16,64});
+    ResultStruct result1 = test_tmp<float>({1024,16384,1,1}, {1024,16384,1,1});
     printf("%lf ", result1.ori_time);
     printf("<time_before_opt>%f ms</time_before_opt>\n", result1.ori_time);
     printf("<time_after_opt>%f ms</time_after_opt>\n", result1.opt_time);

@@ -1,6 +1,3 @@
-#include <cuda_runtime.h>
-#include <math.h>
-
 #define BLOCK_SIZE 256
 
 __global__ void gemm_scale_kernel_opt(
@@ -77,55 +74,46 @@ void test_tmp_kernel_opt(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream
-) {
+    cudaStream_t stream)
+{
+    // Map parameters to original kernel semantics
+    int batch_size = in_batch;
+    int in_features = in_elems / in_batch;
+    int out_features = out_elems / out_batch;
+
+    // Assume all tensors are float as per original kernels
     float* input_f = reinterpret_cast<float*>(input);
     float* output_f = reinterpret_cast<float*>(output);
-    
-    int batch_size = in_batch;
-    int in_features = in_channels * in_height * in_width;
-    int out_features = out_channels * out_height * out_width;
-    
-    float *weight, *bias, *scale, *bn_weight, *bn_bias, *mean, *var;
-    cudaMalloc(&weight, out_features * in_features * sizeof(float));
-    cudaMalloc(&bias, out_features * sizeof(float));
-    cudaMalloc(&scale, out_features * sizeof(float));
-    cudaMalloc(&bn_weight, out_features * sizeof(float));
-    cudaMalloc(&bn_bias, out_features * sizeof(float));
-    cudaMalloc(&mean, out_features * sizeof(float));
-    cudaMalloc(&var, out_features * sizeof(float));
-    
-    cudaMemset(weight, 0, out_features * in_features * sizeof(float));
-    cudaMemset(bias, 0, out_features * sizeof(float));
-    cudaMemset(scale, 0, out_features * sizeof(float));
-    cudaMemset(bn_weight, 0, out_features * sizeof(float));
-    cudaMemset(bn_bias, 0, out_features * sizeof(float));
-    
+
+    // Temporary device buffers for training mode (mean/var)
+    // For kernelbench evaluation, we assume training = true
+    float* d_mean = nullptr;
+    float* d_var = nullptr;
+    cudaMalloc(&d_mean, out_features * sizeof(float));
+    cudaMalloc(&d_var, out_features * sizeof(float));
+
+    // GEMM + Scale
     dim3 block_dim(BLOCK_SIZE);
     dim3 grid_dim((out_features + BLOCK_SIZE - 1) / BLOCK_SIZE, batch_size);
-    
     gemm_scale_kernel_opt<<<grid_dim, block_dim, 0, stream>>>(
-        input_f, weight, bias, scale, output_f,
+        input_f, nullptr, nullptr, nullptr, output_f,
         batch_size, in_features, out_features
     );
-    
+
+    // Compute mean and variance (training path)
     int blocks_stat = (out_features + BLOCK_SIZE - 1) / BLOCK_SIZE;
     compute_mean_var_kernel_opt<<<blocks_stat, BLOCK_SIZE, 0, stream>>>(
-        output_f, mean, var, batch_size, out_features
+        output_f, d_mean, d_var, batch_size, out_features
     );
-    
-    float eps = 1e-5f;
+
+    // Apply batch norm
     int total = batch_size * out_features;
     int blocks_bn = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
     batch_norm_kernel_opt<<<blocks_bn, BLOCK_SIZE, 0, stream>>>(
-        output_f, mean, var, bn_weight, bn_bias, eps, batch_size, out_features
+        output_f, d_mean, d_var, nullptr, nullptr, 1e-5f, batch_size, out_features
     );
-    
-    cudaFree(weight);
-    cudaFree(bias);
-    cudaFree(scale);
-    cudaFree(bn_weight);
-    cudaFree(bn_bias);
-    cudaFree(mean);
-    cudaFree(var);
+
+    // Cleanup
+    cudaFree(d_mean);
+    cudaFree(d_var);
 }

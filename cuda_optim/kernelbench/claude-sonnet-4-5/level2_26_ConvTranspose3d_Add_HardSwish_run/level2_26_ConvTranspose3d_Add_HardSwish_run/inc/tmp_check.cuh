@@ -1,7 +1,7 @@
 #include <cuda_runtime.h>
-#include <math.h>
+#include <cfloat>
 
-__device__ __forceinline__ float hardswish(float x) {
+__device__ inline float hardswish(float x) {
     return x * fminf(fmaxf(x + 3.0f, 0.0f), 6.0f) / 6.0f;
 }
 
@@ -27,8 +27,7 @@ void test_tmp_kernel_ori(
     cudaStream_t stream
 ) {
     const int block_size = 256;
-    const int num_blocks = (in_elems + block_size - 1) / block_size;
-    
+    int num_blocks = (in_elems + block_size - 1) / block_size;
     fused_add_hardswish_kernel_ori<<<num_blocks, block_size, 0, stream>>>(
         reinterpret_cast<const float*>(input),
         reinterpret_cast<const float*>(output),

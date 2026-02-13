@@ -1,5 +1,7 @@
+#include <climits>
+#include <cfloat>
 #include <cuda_runtime.h>
-#include <float.h>
+#include <device_launch_parameters.h>
 
 __global__ void fused_maxpool_sum_kernel_ori(
     const float* __restrict__ input,
@@ -75,36 +77,27 @@ void test_tmp_kernel_ori(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream
-) {
-    // Map 4D interface to 5D tensor dimensions
-    // in_height corresponds to in_d (depth)
-    // in_width corresponds to in_h (height)
-    // in_w is derived from total elements
+    cudaStream_t stream)
+{
     int batch_size = in_batch;
     int channels = in_channels;
     int in_d = in_height;
     int in_h = in_width;
-    int in_w = in_elems / (in_batch * in_channels * in_height * in_width);
-    
-    // Calculate intermediate dimensions after first maxpool (kernel=2)
+    int in_w = 1; // assuming 3D input is passed as 4D with last dim = 1
+
+    // Recompute intermediate and output dimensions based on fixed pooling logic
     int mid_d = in_d / 2;
     int mid_h = in_h / 2;
     int mid_w = in_w / 2;
-    
-    // Map output dimensions
-    // out_height corresponds to out_d
-    // out_width corresponds to out_h
-    // out_w is derived from total output elements
-    int out_d = out_height;
-    int out_h = out_width;
-    int out_w = out_elems / (out_batch * out_channels * out_height * out_width);
-    
-    // Total output elements to compute
-    int total_out = out_elems;
+
+    int out_d = mid_d / 3;
+    int out_h = mid_h / 3;
+    int out_w = mid_w / 3;
+
+    int total_out = batch_size * out_d * out_h * out_w;
     const int block_size = 256;
     const int num_blocks = (total_out + block_size - 1) / block_size;
-    
+
     fused_maxpool_sum_kernel_ori<<<num_blocks, block_size, 0, stream>>>(
         reinterpret_cast<const float*>(input),
         reinterpret_cast<float*>(output),

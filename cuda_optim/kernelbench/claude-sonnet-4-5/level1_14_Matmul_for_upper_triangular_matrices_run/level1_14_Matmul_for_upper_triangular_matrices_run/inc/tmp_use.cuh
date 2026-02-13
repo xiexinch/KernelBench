@@ -33,19 +33,22 @@ void test_tmp_kernel_opt(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
-    const int N = in_height;
-    const float* A = input;
-    const float* B = input + N * N;
-    float* C = output;
-    
+    // Input layout: [A, B] flattened as [N*N, N*N]
+    // We assume both A and B are N x N, so in_elems = 2 * N * N
+    const int N = in_height; // since A and B are square matrices of size N x N
+
+    const T* A = input;
+    const T* B = input + N * N;
+    T* C = output;
+
     const dim3 block_size(16, 16);
     const dim3 num_blocks((N + block_size.x - 1) / block_size.x,
                           (N + block_size.y - 1) / block_size.y);
-    
+
     upper_triangular_matmul_kernel_opt<<<num_blocks, block_size, 0, stream>>>(
-        A,
-        B,
-        C,
+        reinterpret_cast<const float*>(A),
+        reinterpret_cast<const float*>(B),
+        reinterpret_cast<float*>(C),
         N
     );
 }

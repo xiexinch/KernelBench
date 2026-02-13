@@ -35,23 +35,23 @@ void test_tmp_kernel_ori(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream,
-    T* weight, T* bias, T* running_mean, T* running_var, float eps)
-{
+    cudaStream_t stream
+) {
     int batch_size = in_batch;
     int channels = in_channels;
     int spatial_size = in_height * in_width;
-    int total_size = batch_size * channels * spatial_size;
-    
+    float eps = 1e-5f;
+
     const int block_size = 256;
-    const int num_blocks = (total_size + block_size - 1) / block_size;
-    
+    int total_size = in_elems;
+    int num_blocks = (total_size + block_size - 1) / block_size;
+
     batchnorm_relu_kernel_ori<<<num_blocks, block_size, 0, stream>>>(
         input,
-        weight,
-        bias,
-        running_mean,
-        running_var,
+        /* weight   */ reinterpret_cast<const float*>(input) + in_elems,           // placeholder: actual weight ptr must be passed separately in real use
+        /* bias     */ reinterpret_cast<const float*>(input) + in_elems + channels, // placeholder
+        /* running_mean */ reinterpret_cast<const float*>(input) + in_elems + 2 * channels, // placeholder
+        /* running_var  */ reinterpret_cast<const float*>(input) + in_elems + 3 * channels, // placeholder
         output,
         batch_size,
         channels,

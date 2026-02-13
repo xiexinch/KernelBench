@@ -1,60 +1,52 @@
-#include <cuda_runtime.h>
-#include <cstdint>
-
-#ifndef TILE_SIZE
 #define TILE_SIZE 16
-#endif
 
-__global__ void bmm_kernel_ori(
-    const float* A, 
-    const float* B, 
-    float* C,
-    int batch_size,
-    int m, int n, int k) {
+__global__ void batched_matmul_kernel_ori(
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    float* __restrict__ C,
+    int batch_size, int m, int k, int n) {
     
-    // Shared memory for tile of A and B
-    __shared__ float As[TILE_SIZE][TILE_SIZE];
-    __shared__ float Bs[TILE_SIZE][TILE_SIZE];
+    __shared__ float tile_A[TILE_SIZE][TILE_SIZE];
+    __shared__ float tile_B[TILE_SIZE][TILE_SIZE];
     
-    int batch = blockIdx.z;
+    int batch_idx = blockIdx.z;
     int row = blockIdx.y * TILE_SIZE + threadIdx.y;
     int col = blockIdx.x * TILE_SIZE + threadIdx.x;
     
     float sum = 0.0f;
     
-    // Loop over tiles
-    for (int t = 0; t < (k + TILE_SIZE - 1) / TILE_SIZE; ++t) {
-        // Load tile of A into shared memory
-        int A_row = row;
-        int A_col = t * TILE_SIZE + threadIdx.x;
-        if (A_row < m && A_col < k) {
-            As[threadIdx.y][threadIdx.x] = A[batch * m * k + A_row * k + A_col];
+    int A_offset = batch_idx * m * k;
+    int B_offset = batch_idx * k * n;
+    int C_offset = batch_idx * m * n;
+    
+    for (int tile = 0; tile < (k + TILE_SIZE - 1) / TILE_SIZE; ++tile) {
+        int tile_col = tile * TILE_SIZE + threadIdx.x;
+        int tile_row = tile * TILE_SIZE + threadIdx.y;
+        
+        if (row < m && tile_col < k) {
+            tile_A[threadIdx.y][threadIdx.x] = A[A_offset + row * k + tile_col];
         } else {
-            As[threadIdx.y][threadIdx.x] = 0.0f;
+            tile_A[threadIdx.y][threadIdx.x] = 0.0f;
         }
         
-        // Load tile of B into shared memory
-        int B_row = t * TILE_SIZE + threadIdx.y;
-        int B_col = col;
-        if (B_row < k && B_col < n) {
-            Bs[threadIdx.y][threadIdx.x] = B[batch * k * n + B_row * n + B_col];
+        if (tile_row < k && col < n) {
+            tile_B[threadIdx.y][threadIdx.x] = B[B_offset + tile_row * n + col];
         } else {
-            Bs[threadIdx.y][threadIdx.x] = 0.0f;
+            tile_B[threadIdx.y][threadIdx.x] = 0.0f;
         }
         
         __syncthreads();
         
-        // Compute partial sum for this tile
+        #pragma unroll
         for (int i = 0; i < TILE_SIZE; ++i) {
-            sum += As[threadIdx.y][i] * Bs[i][threadIdx.x];
+            sum += tile_A[threadIdx.y][i] * tile_B[i][threadIdx.x];
         }
         
         __syncthreads();
     }
     
-    // Write result to C
     if (row < m && col < n) {
-        C[batch * m * n + row * n + col] = sum;
+        C[C_offset + row * n + col] = sum;
     }
 }
 
@@ -64,35 +56,45 @@ void test_tmp_kernel_ori(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream
-) {
-    // Extract parameters from input/output shapes
-    // For BMM: input = A, output = C, B is the second input
-    // We'll use the first half of input as A, second half as B
+    cudaStream_t stream)
+{
+    // Map input layout to A: [batch, m, k]
+    // Map output layout to C: [batch, m, n]
+    // B is assumed to be provided as part of the kernel logic, but since we only have input and output,
+    // we reinterpret input as containing both A and B concatenated.
+    // However, based on the original kernel signature, we need separate A and B.
+    // Since the test function only provides one input pointer, we assume that:
+    // - The first half of input corresponds to A (size: in_batch * in_height * in_channels)
+    // - The second half corresponds to B (size: in_batch * in_channels * in_width)
+    // But the given parameters don't expose B's dimensions directly.
+    //
+    // Instead, we follow the original kernel's intended usage:
+    // A: [in_batch, in_height, in_channels] -> m=in_height, k=in_channels
+    // B: [in_batch, in_channels, in_width]  -> k=in_channels, n=in_width
+    // C: [out_batch, out_height, out_width] -> m=out_height, n=out_width
+    //
+    // We assume in_batch == out_batch, in_height == out_height, in_width == out_width
+
     int batch_size = in_batch;
     int m = in_height;
-    int k = in_channels;  // Using in_channels as k dimension
-    int n = out_width;    // Using out_width as n dimension
-    
-    // Configure grid and block dimensions
-    dim3 blockDim(TILE_SIZE, TILE_SIZE);
-    dim3 gridDim(
-        (n + TILE_SIZE - 1) / TILE_SIZE,
-        (m + TILE_SIZE - 1) / TILE_SIZE,
-        batch_size
-    );
-    
-    // Split input into A and B
+    int k = in_channels;
+    int n = in_width;
+
+    dim3 block(TILE_SIZE, TILE_SIZE);
+    dim3 grid((n + TILE_SIZE - 1) / TILE_SIZE, 
+              (m + TILE_SIZE - 1) / TILE_SIZE,
+              batch_size);
+
+    // Assume input contains A and B concatenated:
+    // A starts at input
+    // B starts at input + (batch_size * m * k)
     T* A = input;
-    T* B = input + batch_size * m * k;  // B starts after A
-    T* C = output;
-    
-    // Launch kernel
-    bmm_kernel_ori<<<gridDim, blockDim, 0, stream>>>(
-        A,
-        B,
-        C,
-        batch_size,
-        m, n, k
+    T* B = input + (batch_size * m * k);
+
+    batched_matmul_kernel_ori<<<grid, block, 0, stream>>>(
+        reinterpret_cast<const float*>(A),
+        reinterpret_cast<const float*>(B),
+        reinterpret_cast<float*>(output),
+        batch_size, m, k, n
     );
 }

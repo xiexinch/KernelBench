@@ -1,5 +1,3 @@
-#include <cuda_runtime.h>
-
 __global__ void fused_mul_gap_kernel_ori(const float* input, float* output, 
                                       float multiplier, int batch_size, 
                                       int channels, int spatial_size) {
@@ -27,26 +25,22 @@ void test_tmp_kernel_ori(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream
-) {
-    // Calculate spatial dimensions
+    cudaStream_t stream)
+{
+    int batch_size = in_batch;
+    int channels = in_channels;
     int spatial_size = in_height * in_width;
-    int total_threads = in_batch * in_channels;
-    
-    // Configure kernel launch
+    float multiplier = 0.5f; // default value from example
+
     const int block_size = 256;
-    const int num_blocks = (total_threads + block_size - 1) / block_size;
-    
-    // Multiplier value from the original model configuration
-    const float multiplier = 0.5f;
-    
-    // Launch kernel - assumes T is float for this specific kernel
+    const int num_blocks = (batch_size * channels + block_size - 1) / block_size;
+
     fused_mul_gap_kernel_ori<<<num_blocks, block_size, 0, stream>>>(
         reinterpret_cast<const float*>(input),
         reinterpret_cast<float*>(output),
         multiplier,
-        in_batch,
-        in_channels,
+        batch_size,
+        channels,
         spatial_size
     );
 }

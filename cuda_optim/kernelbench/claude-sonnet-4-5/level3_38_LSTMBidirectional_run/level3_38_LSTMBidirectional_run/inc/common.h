@@ -465,3 +465,26 @@ printf("throughput : %f G, time_use:%f,bandwidth:%f TB/S\n",throughput * 1.0f / 
 printf("throughput : %f G\n",throughput * 1.0f / 1024 / 1024 / 1024);
 #define Align(x, y) (((x) + (y)-1) / (y) * (y))
 #define DivUp(x, y) (((x) + (y)-1) / (y))
+__device__ float sigmoid(float x) {
+    return 1.0f / (1.0f + expf(-x));
+}
+
+__device__ float tanh_func(float x) {
+    return tanhf(x);
+}
+
+__device__ float sigmoid(float x) {
+    return 1.0f / (1.0f + expf(-x));
+}
+
+__device__ float tanh_func(float x) {
+    return tanhf(x);
+}
+
+__device__ float sigmoid(float x) {
+    return 1.0f / (1.0f + expf(-x));
+}
+
+__device__ float tanh_func(float x) {
+    return tanhf(x);
+}

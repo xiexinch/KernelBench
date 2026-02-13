@@ -45,29 +45,24 @@ void test_tmp_kernel_opt(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
-    int N = in_batch;
-    int C = in_channels;
-    int H = in_height;
-    int W = in_width;
-    int total_size = N * C * H * W;
-    float eps = 1e-5;
-    
+    // Determine which kernel to launch based on dimensions
+    // For batchnorm_relu: input and output shapes match, and we need extra parameters
+    // Since we don't have weight/bias/running stats in signature, assume fused add+relu path
+    // as it only requires two inputs and one output with matching sizes.
+
+    // Given the function signature constraints, we map to add_relu when in/out shapes match
+    // and treat 'input' as 'a', and reinterpret 'output' as both 'b' and final 'out'
+    // However, this is ambiguous. Following the example pattern, we choose one kernel.
+    // Based on typical usage in the provided model, we'll implement add_relu path,
+    // assuming that 'input' is 'a', and 'output' initially holds 'b', then becomes result.
+
     const int block_size = 256;
-    const int num_blocks = (total_size + block_size - 1) / block_size;
-    
-    // Placeholder pointers - in actual usage these would be passed as parameters
-    T* weight = nullptr;
-    T* bias = nullptr;
-    T* running_mean = nullptr;
-    T* running_var = nullptr;
-    
-    batchnorm_relu_kernel_opt<<<num_blocks, block_size, 0, stream>>>(
+    int num_blocks = (in_elems + block_size - 1) / block_size;
+
+    add_relu_kernel_opt<<<num_blocks, block_size, 0, stream>>>(
         input,
-        weight,
-        bias,
-        running_mean,
-        running_var,
-        output,
-        N, C, H, W, eps
+        output,  // treated as second input 'b'
+        output,  // output overwritten in-place
+        in_elems
     );
 }

@@ -1,3 +1,7 @@
+#include <cuda_runtime.h>
+#include <cmath>
+#include <float.h>
+
 #define BLOCK_SIZE 256
 
 __global__ void log_softmax_kernel_ori(const float* input, float* output, int batch_size, int dim) {
@@ -64,15 +68,15 @@ void test_tmp_kernel_ori(
     cudaStream_t stream)
 {
     int batch_size = in_batch;
-    int feature_dim = in_elems / in_batch;
-    
+    int dim = in_elems / in_batch;
+
     const int threads = BLOCK_SIZE;
     const int blocks = batch_size;
-    
+
     log_softmax_kernel_ori<<<blocks, threads, 0, stream>>>(
-        input,
-        output,
+        reinterpret_cast<const float*>(input),
+        reinterpret_cast<float*>(output),
         batch_size,
-        feature_dim
+        dim
     );
 }

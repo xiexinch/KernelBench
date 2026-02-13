@@ -50,17 +50,22 @@ void test_tmp_kernel_opt(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
+    // Interpret input as matrix A (M x K) and output buffer will hold C (M x N)
+    // We assume B is packed right after A in input buffer: [A | B]
+    // A shape: (M, K) => in_batch = M, in_channels = K (assuming in_height=in_width=1)
+    // B shape: (K, N) => derived from output shape: out_batch = M, out_height = 1, out_channels = N
     int M = in_batch;
-    int K = in_height;
-    int N = in_channels;
-    
+    int K = in_channels;
+    int N = out_channels;
+
+    const float* A = reinterpret_cast<const float*>(input);
+    const float* B = reinterpret_cast<const float*>(input + M * K);
+    float* C = reinterpret_cast<float*>(output);
+
     dim3 block(TILE_SIZE, TILE_SIZE);
     dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE);
-    
+
     matmul_small_k_kernel_opt<<<grid, block, 0, stream>>>(
-        input,
-        output,
-        output,
-        M, N, K
+        A, B, C, M, N, K
     );
 }

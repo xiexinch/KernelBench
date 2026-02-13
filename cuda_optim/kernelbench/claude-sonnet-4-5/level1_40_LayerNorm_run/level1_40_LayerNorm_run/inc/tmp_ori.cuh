@@ -1,4 +1,3 @@
-#include <vector>
 __global__ void layernorm_forward_kernel_opt(
     const float* __restrict__ x,
     const float* __restrict__ gamma,
@@ -73,21 +72,41 @@ void test_tmp_kernel_opt(
 {
     int batch_size = in_batch;
     int normalized_size = in_elems / batch_size;
-    float eps = 1e-5;
-    
-    // Allocate gamma and beta on device (initialized to 1 and 0 respectively)
-    T* gamma;
-    T* beta;
-    cudaMalloc(&gamma, normalized_size * sizeof(T));
-    cudaMalloc(&beta, normalized_size * sizeof(T));
-    
+    float eps = 1e-5f;
+
+    // Gamma and beta are not passed as arguments, so we allocate and initialize them on device
+    // For benchmarking purposes, we assume they are vectors of size `normalized_size`
+    T* d_gamma = nullptr;
+    T* d_beta = nullptr;
+    cudaMalloc(&d_gamma, normalized_size * sizeof(T));
+    cudaMalloc(&d_beta, normalized_size * sizeof(T));
+
     // Initialize gamma to 1 and beta to 0
-    std::vector<T> gamma_host(normalized_size, 1.0f);
-    std::vector<T> beta_host(normalized_size, 0.0f);
-    cudaMemcpy(gamma, gamma_host.data(), normalized_size * sizeof(T), cudaMemcpyHostToDevice);
-    cudaMemcpy(beta, beta_host.data(), normalized_size * sizeof(T), cudaMemcpyHostToDevice);
-    
+    T* h_gamma = new T[normalized_size];
+    T* h_beta = new T[normalized_size];
+    for (int i = 0; i < normalized_size; ++i) {
+        h_gamma[i] = static_cast<T>(1.0);
+        h_beta[i] = static_cast<T>(0.0);
+    }
+    cudaMemcpyAsync(d_gamma, h_gamma, normalized_size * sizeof(T), cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_beta, h_beta, normalized_size * sizeof(T), cudaMemcpyHostToDevice, stream);
+
     const int threads = 256;
     const int blocks = batch_size;
-    
-    layernorm_forward_kernel_opt<<<blocks, threads
+
+    layernorm_forward_kernel_opt<<<blocks, threads, 0, stream>>>(
+        reinterpret_cast<const float*>(input),
+        reinterpret_cast<const float*>(d_gamma),
+        reinterpret_cast<const float*>(d_beta),
+        reinterpret_cast<float*>(output),
+        batch_size,
+        normalized_size,
+        eps
+    );
+
+    // Clean up
+    delete[] h_gamma;
+    delete[] h_beta;
+    cudaFree(d_gamma);
+    cudaFree(d_beta);
+}

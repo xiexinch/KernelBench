@@ -1,8 +1,6 @@
 #include <cuda_runtime.h>
 #include <math.h>
-#include <float.h>
-#include <type_traits>
-#include <cstdlib>
+#include <cfloat>
 
 __global__ void fused_groupnorm_tanh_hardswish_residual_kernel_ori(
     const float* x_conv,
@@ -77,7 +75,7 @@ __global__ void logsumexp_kernel_ori(
         int s = idx % spatial_size;
         
         // Find max for numerical stability
-        float max_val = -INFINITY;
+        float max_val = -FLT_MAX;
         for (int c = 0; c < channels; c++) {
             int input_idx = b * channels * spatial_size + c * spatial_size + s;
             max_val = fmaxf(max_val, input[input_idx]);
@@ -101,56 +99,31 @@ void test_tmp_kernel_ori(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream
-) {
-    static_assert(std::is_same<T, float>::value, "Only float type is supported");
-    
-    float* input_f = reinterpret_cast<float*>(input);
-    float* output_f = reinterpret_cast<float*>(output);
-    
+    cudaStream_t stream)
+{
     int batch_size = in_batch;
     int channels = in_channels;
     int spatial_size = in_height * in_width;
-    int groups = (channels % 16 == 0) ? 16 : 1;
+    int groups = 16;
     float eps = 1e-5f;
-    
-    // Allocate intermediate buffer for first kernel output
-    float* intermediate;
-    cudaMalloc(&intermediate, in_elems * sizeof(float));
-    
-    // Allocate and initialize gamma (ones) and beta (zeros)
-    float *gamma, *beta;
-    cudaMalloc(&gamma, channels * sizeof(float));
-    cudaMalloc(&beta, channels * sizeof(float));
-    
-    float* gamma_h = new float[channels];
-    float* beta_h = new float[channels];
-    for (int i = 0; i < channels; i++) {
-        gamma_h[i] = 1.0f;
-        beta_h[i] = 0.0f;
-    }
-    cudaMemcpy(gamma, gamma_h, channels * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(beta, beta_h, channels * sizeof(float), cudaMemcpyHostToDevice);
-    delete[] gamma_h;
-    delete[] beta_h;
-    
-    // Launch fused GroupNorm + Tanh + HardSwish + Residual kernel
+
     const int threads = 256;
-    const int blocks1 = (in_elems + threads - 1) / threads;
-    fused_groupnorm_tanh_hardswish_residual_kernel_ori<<<blocks1, threads, 0, stream>>>(
-        input_f, gamma, beta, intermediate,
-        batch_size, channels, spatial_size, groups, eps
+    const int blocks = (in_elems + threads - 1) / threads;
+
+    // Gamma and beta are assumed to be stored right after input in memory
+    // gamma starts at input + in_elems, beta starts at input + in_elems + channels
+    const float* gamma_ptr = reinterpret_cast<const float*>(input + in_elems);
+    const float* beta_ptr = reinterpret_cast<const float*>(input + in_elems + channels);
+
+    fused_groupnorm_tanh_hardswish_residual_kernel_ori<<<blocks, threads, 0, stream>>>(
+        reinterpret_cast<const float*>(input),
+        gamma_ptr,
+        beta_ptr,
+        reinterpret_cast<float*>(output),
+        batch_size,
+        channels,
+        spatial_size,
+        groups,
+        eps
     );
-    
-    // Launch LogSumExp kernel
-    const int blocks2 = (out_elems + threads - 1) / threads;
-    logsumexp_kernel_ori<<<blocks2, threads, 0, stream>>>(
-        intermediate, output_f,
-        batch_size, channels, spatial_size
-    );
-    
-    // Cleanup temporary allocations
-    cudaFree(intermediate);
-    cudaFree(gamma);
-    cudaFree(beta);
 }

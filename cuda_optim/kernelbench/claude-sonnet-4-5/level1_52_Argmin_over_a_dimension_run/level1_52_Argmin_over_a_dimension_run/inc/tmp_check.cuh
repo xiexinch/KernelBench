@@ -73,24 +73,37 @@ void test_tmp_kernel_ori(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
+    // Map tensor dimensions: assume layout is [batch, dim1, dim2]
     int batch_size = in_batch;
     int dim1 = in_height;
-    int dim2 = in_channels;
-    int dim = 1;
-    
-    int total_threads;
-    if (dim == 0) {
+    int dim2 = in_width;
+
+    // Determine argmin_dim based on output shape change
+    int argmin_dim = -1;
+    if (out_batch == dim1 && out_height == dim2) {
+        argmin_dim = 0; // reduced batch dim
+    } else if (out_batch == batch_size && out_height == dim2) {
+        argmin_dim = 1; // reduced height (dim1)
+    } else if (out_batch == batch_size && out_height == dim1) {
+        argmin_dim = 2; // reduced width (dim2)
+    }
+
+    // Determine total threads based on argmin_dim
+    int total_threads = 0;
+    if (argmin_dim == 0) {
         total_threads = dim1 * dim2;
-    } else if (dim == 1) {
+    } else if (argmin_dim == 1) {
         total_threads = batch_size * dim2;
-    } else {
+    } else if (argmin_dim == 2) {
         total_threads = batch_size * dim1;
     }
-    
+
     const int block_size = 256;
     const int num_blocks = (total_threads + block_size - 1) / block_size;
-    
+
     argmin_kernel_ori<<<num_blocks, block_size, 0, stream>>>(
-        input,
-        (int64_t*)output,
-        batch_size
+        reinterpret_cast<const float*>(input),
+        reinterpret_cast<int64_t*>(output),
+        batch_size, dim1, dim2, argmin_dim
+    );
+}

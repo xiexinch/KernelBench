@@ -51,22 +51,22 @@ void test_tmp_kernel_opt(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
-    // Assuming reduction over dimension 1 (dim1 = 4096)
-    // Input shape: [batch_size, dim1, dim2] = [128, 4096, 4095]
-    // Output shape: [batch_size, dim2] = [128, 4095]
-    
-    int outer_size = in_batch;  // 128
-    int reduce_dim_size = in_height;  // 4096
-    int inner_size = in_channels;  // 4095
-    
+    // Assume reduction is along dim=1 (in_channels), consistent with typical usage
+    // This maps to: outer_size = in_batch, reduce_dim_size = in_channels, inner_size = in_width
+    // Note: in_height is unused here assuming 3D tensor [batch, channels, width]
+    int outer_size = in_batch;
+    int reduce_dim_size = in_channels;
+    int inner_size = in_width;
+
+    // Adjust block and grid dimensions as in original
     dim3 block_size(256, 1);
     dim3 grid_size(outer_size, (inner_size + block_size.y - 1) / block_size.y);
-    
+
     mean_reduction_kernel_opt<<<grid_size, block_size, 0, stream>>>(
-        input, 
-        output,
-        reduce_dim_size, 
-        inner_size, 
+        reinterpret_cast<const float*>(input),
+        reinterpret_cast<float*>(output),
+        reduce_dim_size,
+        inner_size,
         outer_size
     );
 }

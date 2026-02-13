@@ -47,13 +47,20 @@ void test_tmp_kernel_ori(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
-    int N = in_height;
-    T* A = input;
-    T* B = input + N * N;
-    T* C = output;
-    
+    // Assume square matrix multiplication: input is interpreted as two concatenated matrices A and B
+    // For this benchmark, we assume the first half of input is A, second half is B
+    // and both are of size N x N, where N = in_height (assuming in_batch == 1, in_channels == 1)
+    int N = in_height; // assuming square matrices of size N x N
+    const T* A = input;
+    const T* B = input + N * N;
+
     dim3 block(TILE_SIZE, TILE_SIZE);
     dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE, (N + TILE_SIZE - 1) / TILE_SIZE);
-    
-    matmul_kernel_ori<<<grid, block, 0, stream>>>(A, B, C, N);
+
+    matmul_kernel_ori<<<grid, block, 0, stream>>>(
+        reinterpret_cast<const float*>(A),
+        reinterpret_cast<const float*>(B),
+        reinterpret_cast<float*>(output),
+        N
+    );
 }

@@ -92,7 +92,7 @@ ResultStruct test_tmp(std::vector<int> input_size, std::vector<int> output_size)
 }
 
 int main() {
-    ResultStruct result1 = test_tmp<float>({16,128,64,1}, {16,62,64,1});
+    ResultStruct result1 = test_tmp<float>({1024,16384,1,1}, {1024,16384,1,1});
     printf("%lf ", result1.ori_time);
     printf("<time_before_opt>%f ms</time_before_opt>\n", result1.ori_time);
     printf("<time_after_opt>%f ms</time_after_opt>\n", result1.opt_time);

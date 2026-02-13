@@ -68,23 +68,24 @@ void test_tmp_kernel_ori(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream
-) {
-    // Parameters from the benchmark configuration
-    const int pool_size = 2;
-    const int pool_stride = 2;
-    const float hardtanh_min = -1.0f;
-    const float hardtanh_max = 1.0f;
-    
-    int total_threads = in_batch * in_channels;
+    cudaStream_t stream)
+{
+    int batch_size = in_batch;
+    int channels = in_channels;
+    int pool_size = 2; // inferred from example usage
+    int pool_stride = 2; // inferred from example usage
+    float hardtanh_min = -1.0f; // inferred from example usage
+    float hardtanh_max = 1.0f; // inferred from example usage
+
+    int total_threads = batch_size * channels;
     const int block_size = 256;
     const int num_blocks = (total_threads + block_size - 1) / block_size;
-    
+
     fused_maxpool_hardtanh_mean_tanh_kernel_ori<<<num_blocks, block_size, 0, stream>>>(
         reinterpret_cast<const float*>(input),
         reinterpret_cast<float*>(output),
-        in_batch,
-        in_channels,
+        batch_size,
+        channels,
         in_height,
         in_width,
         pool_size,

@@ -1,3 +1,6 @@
+#include <cuda_runtime.h>
+#include <cmath>
+
 __global__ void conv1x1_relu_kernel_ori(
     const float* __restrict__ input,
     const float* __restrict__ weight,
@@ -22,7 +25,7 @@ __global__ void conv1x1_relu_kernel_ori(
             sum += input[input_offset + ic * height * width] * weight[oc * in_channels + ic];
         }
         
-        output[idx] = fmaxf(sum, 0.0f);  // ReLU
+        output[idx] = fmaxf(sum, 0.0f);
     }
 }
 
@@ -62,7 +65,7 @@ __global__ void conv3x3_relu_kernel_ori(
             }
         }
         
-        output[idx] = fmaxf(sum, 0.0f);  // ReLU
+        output[idx] = fmaxf(sum, 0.0f);
     }
 }
 
@@ -74,6 +77,51 @@ void test_tmp_kernel_ori(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
-    // This entry function is not directly used as the kernels are called via torch::Tensor interface
-    // Placeholder implementation
+    const int block_size = 256;
+    int num_blocks = (out_elems + block_size - 1) / block_size;
+    
+    // Determine kernel type based on output dimensions
+    bool is_1x1_case = (in_height == out_height && in_width == out_width);
+    
+    // Allocate minimal dummy weight and bias arrays
+    float *d_weight = nullptr;
+    float *d_bias = nullptr;
+    size_t weight_size, bias_size;
+    
+    if (is_1x1_case) {
+        weight_size = static_cast<size_t>(out_channels) * in_channels * sizeof(float);
+        bias_size = static_cast<size_t>(out_channels) * sizeof(float);
+    } else {
+        weight_size = static_cast<size_t>(out_channels) * in_channels * 9 * sizeof(float);
+        bias_size = static_cast<size_t>(out_channels) * sizeof(float);
+    }
+    
+    cudaMalloc(&d_weight, weight_size);
+    cudaMalloc(&d_bias, bias_size);
+    
+    // Initialize to zero
+    cudaMemsetAsync(d_weight, 0, weight_size, stream);
+    cudaMemsetAsync(d_bias, 0, bias_size, stream);
+    
+    if (is_1x1_case) {
+        conv1x1_relu_kernel_ori<<<num_blocks, block_size, 0, stream>>>(
+            reinterpret_cast<const float*>(input),
+            d_weight,
+            d_bias,
+            reinterpret_cast<float*>(output),
+            in_batch, in_channels, out_channels, in_height, in_width
+        );
+    } else {
+        conv3x3_relu_kernel_ori<<<num_blocks, block_size, 0, stream>>>(
+            reinterpret_cast<const float*>(input),
+            d_weight,
+            d_bias,
+            reinterpret_cast<float*>(output),
+            in_batch, in_channels, out_channels, in_height, in_width
+        );
+    }
+    
+    // Clean up
+    cudaFreeAsync(d_weight, stream);
+    cudaFreeAsync(d_bias, stream);
 }

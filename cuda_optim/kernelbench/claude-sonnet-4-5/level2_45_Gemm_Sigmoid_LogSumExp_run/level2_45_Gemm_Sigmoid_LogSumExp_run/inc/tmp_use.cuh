@@ -1,5 +1,6 @@
 #include <cuda_runtime.h>
-#include <math.h>
+#include <cmath>
+#include <cfloat>
 
 __global__ void matmul_sigmoid_kernel_opt(
     const float* __restrict__ input,
@@ -64,58 +65,59 @@ void test_tmp_kernel_opt(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream
-) {
-    // Model dimensions from original benchmark
-    const int batch_size = in_batch;
-    const int input_size = in_height;  // Assuming in_channels=1, in_width=1
-    const int hidden_size = 4096;
-    const int output_size = 1024;
+    cudaStream_t stream)
+{
+    // For this benchmark, we assume the following dimension mapping:
+    // Input tensor: [in_batch, in_width] where in_height = in_channels = 1
+    // Output tensor shape determines which kernel to run
     
-    float* input_f = reinterpret_cast<float*>(input);
-    float* output_f = reinterpret_cast<float*>(output);
-    
-    // Allocate intermediate buffer for hidden layer
-    float* intermediate;
-    cudaMalloc(&intermediate, batch_size * hidden_size * sizeof(float));
-    
-    // Static weights and biases (initialized once)
-    static float* weight1 = nullptr;
-    static float* bias1 = nullptr;
-    static float* weight2 = nullptr;
-    static float* bias2 = nullptr;
-    
-    if (weight1 == nullptr) {
-        cudaMalloc(&weight1, hidden_size * input_size * sizeof(float));
-        cudaMalloc(&bias1, hidden_size * sizeof(float));
-        cudaMalloc(&weight2, output_size * hidden_size * sizeof(float));
-        cudaMalloc(&bias2, output_size * sizeof(float));
+    // Case 1: Output is 1D (logsumexp) - out_height, out_channels, out_width are 1
+    if (out_height == 1 && out_channels == 1 && out_width == 1) {
+        int batch_size = in_batch;
+        int hidden_size = in_width; // input is [batch, hidden]
+        int output_size = out_batch; // but we need to infer from context
         
-        // Initialize with zeros (or could use random values)
-        cudaMemset(weight1, 0, hidden_size * input_size * sizeof(float));
-        cudaMemset(bias1, 0, hidden_size * sizeof(float));
-        cudaMemset(weight2, 0, output_size * hidden_size * sizeof(float));
-        cudaMemset(bias2, 0, output_size * sizeof(float));
+        // Since weight/bias dimensions aren't provided in the interface,
+        // we use the problem's example configuration:
+        // From the original code: input_size=2048, hidden_size=4096, output_size=1024
+        // But for general case, we assume output_size can be derived from out_batch
+        // However, out_batch should equal batch_size for logsumexp
+        // So we need another way - we'll use a fixed output_size based on typical usage
+        // But this is not robust. Instead, we note that in the original test:
+        // - First kernel: input [16384, 2048] -> output [16384, 4096]
+        // - Second kernel: input [16384, 4096] -> output [16384]
+        // So for logsumexp, hidden_size = in_width, and output_size is unknown
+        
+        // Given the constraints of the interface, we must assume that
+        // additional parameters (weight, bias) are available as global device variables
+        extern __device__ float* d_weight;
+        extern __device__ float* d_bias;
+        extern __device__ int d_output_size;
+        
+        int block_size = 256;
+        int num_blocks = (batch_size + block_size - 1) / block_size;
+        
+        matmul_logsumexp_kernel_opt<<<num_blocks, block_size, 0, stream>>>(
+            input, d_weight, d_bias, output,
+            batch_size, hidden_size, d_output_size
+        );
     }
-    
-    // First layer: matmul + sigmoid
-    dim3 block1(16, 16);
-    dim3 grid1((hidden_size + block1.x - 1) / block1.x, 
-               (batch_size + block1.y - 1) / block1.y);
-    
-    matmul_sigmoid_kernel_opt<<<grid1, block1, 0, stream>>>(
-        input_f, weight1, bias1, intermediate,
-        batch_size, input_size, hidden_size
-    );
-    
-    // Second layer: matmul + logsumexp
-    int block_size = 256;
-    int num_blocks = (batch_size + block_size - 1) / block_size;
-    
-    matmul_logsumexp_kernel_opt<<<num_blocks, block_size, 0, stream>>>(
-        intermediate, weight2, bias2, output_f,
-        batch_size, hidden_size, output_size
-    );
-    
-    cudaFree(intermediate);
+    // Case 2: Output is 2D (sigmoid) - typical matmul case
+    else {
+        int batch_size = in_batch;
+        int input_size = in_width;
+        int hidden_size = out_width; // output is [batch, hidden]
+        
+        extern __device__ float* d_weight;
+        extern __device__ float* d_bias;
+        
+        dim3 block(16, 16);
+        dim3 grid((hidden_size + block.x - 1) / block.x, 
+                  (batch_size + block.y - 1) / block.y);
+        
+        matmul_sigmoid_kernel_opt<<<grid, block, 0, stream>>>(
+            input, d_weight, d_bias, output,
+            batch_size, input_size, hidden_size
+        );
+    }
 }

@@ -24,7 +24,7 @@ __global__ void batchnorm_relu_kernel_ori(
         float b_val = bias[c];
         
         // BatchNorm
-        float normalized = (val - mean) / sqrt(var + eps);
+        float normalized = (val - mean) / sqrtf(var + eps);
         float bn_out = normalized * w_val + b_val;
         
         // ReLU
@@ -38,29 +38,33 @@ void test_tmp_kernel_ori(
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream,
-    T* weight,
-    T* bias,
-    T* running_mean,
-    T* running_var,
-    float eps)
+    cudaStream_t stream)
 {
+    // Assume all inputs are float for this kernel
+    const float* weight     = reinterpret_cast<const float*>(input + in_elems);
+    const float* bias       = reinterpret_cast<const float*>(input + in_elems + in_channels);
+    const float* running_mean = reinterpret_cast<const float*>(input + in_elems + 2 * in_channels);
+    const float* running_var  = reinterpret_cast<const float*>(input + in_elems + 3 * in_channels);
+
+    float* out_ptr = reinterpret_cast<float*>(output);
+
     int N = in_batch;
     int C = in_channels;
     int H = in_height;
     int W = in_width;
-    
+    float eps = 1e-5f;
+
     int total = N * C * H * W;
     const int block_size = 256;
-    const int num_blocks = (total + block_size - 1) / block_size;
-    
+    int num_blocks = (total + block_size - 1) / block_size;
+
     batchnorm_relu_kernel_ori<<<num_blocks, block_size, 0, stream>>>(
-        input,
+        reinterpret_cast<const float*>(input),
         weight,
         bias,
         running_mean,
         running_var,
-        output,
+        out_ptr,
         N, C, H, W, eps
     );
 }

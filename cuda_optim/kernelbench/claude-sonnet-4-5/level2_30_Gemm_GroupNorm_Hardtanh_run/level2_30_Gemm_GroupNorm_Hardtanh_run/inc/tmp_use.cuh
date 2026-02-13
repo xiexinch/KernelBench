@@ -1,5 +1,3 @@
-#include <cuda_runtime.h>
-
 __global__ void fused_group_norm_hardtanh_kernel_opt(
     const float* __restrict__ input,
     const float* __restrict__ gamma,
@@ -48,59 +46,49 @@ __global__ void fused_group_norm_hardtanh_kernel_opt(
     }
 }
 
-__global__ void init_gamma_beta_kernel_opt(float* gamma, float* beta, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        gamma[idx] = 1.0f;
-        beta[idx] = 0.0f;
-    }
-}
-
 template <typename T>
 void test_tmp_kernel_opt(
     T* input, T* output,
     int in_batch, int in_height, int in_channels, int in_width,
     int out_batch, int out_height, int out_channels, int out_width,
     int in_elems, int out_elems,
-    cudaStream_t stream
-) {
-    // Map dimensions: 
-    // - in_batch -> batch_size
-    // - in_height -> num_groups
-    // - in_channels * in_width -> channels_per_group (absorb spatial width into group channels)
-    // Total channels = num_groups * channels_per_group = in_height * in_channels * in_width
+    cudaStream_t stream)
+{
+    // Extract dimensions from input layout: assumed to be (batch, channels)
+    // Since height and width are 1 for fully connected layers
     int batch_size = in_batch;
-    int num_groups = in_height;
-    int channels_per_group = in_channels * in_width;
-    int num_channels = num_groups * channels_per_group;
-    
-    // Hardcoded parameters from original test configuration
+    int num_channels = in_channels;
+    int num_groups = 16; // fixed per original model config
+    int channels_per_group = num_channels / num_groups;
     float eps = 1e-5f;
     float min_val = -2.0f;
     float max_val = 2.0f;
-    
-    // Cast pointers to float (kernel is float-specific)
-    float* input_f = reinterpret_cast<float*>(input);
-    float* output_f = reinterpret_cast<float*>(output);
-    
-    // Allocate gamma and beta buffers
-    float *gamma = nullptr;
-    float *beta = nullptr;
-    cudaMalloc(&gamma, num_channels * sizeof(float));
-    cudaMalloc(&beta, num_channels * sizeof(float));
-    
-    // Initialize gamma to 1.0 and beta to 0.0 (identity transformation)
-    int block_size = 256;
-    int grid_size = (num_channels + block_size - 1) / block_size;
-    init_gamma_beta_kernel_opt<<<grid_size, block_size, 0, stream>>>(gamma, beta, num_channels);
-    
-    // Launch kernel: one block per (batch, group) pair, one thread per block
+
+    // Gamma and beta are channel-wise parameters
+    // Allocate and initialize them on device
+    T* gamma = nullptr;
+    T* beta = nullptr;
+    cudaMalloc(&gamma, num_channels * sizeof(T));
+    cudaMalloc(&beta, num_channels * sizeof(T));
+
+    // Initialize gamma to 1 and beta to 0
+    cudaMemset(gamma, 0, num_channels * sizeof(T));
+    cudaMemset(beta, 0, num_channels * sizeof(T));
+
+    // Set gamma to 1
+    T one = static_cast<T>(1);
+    T zero = static_cast<T>(0);
+    for (int i = 0; i < num_channels; ++i) {
+        cudaMemcpyAsync(gamma + i, &one, sizeof(T), cudaMemcpyHostToDevice, stream);
+        cudaMemcpyAsync(beta + i, &zero, sizeof(T), cudaMemcpyHostToDevice, stream);
+    }
+
     int num_blocks = batch_size * num_groups;
     fused_group_norm_hardtanh_kernel_opt<<<num_blocks, 1, 0, stream>>>(
-        input_f,
-        gamma,
-        beta,
-        output_f,
+        reinterpret_cast<const float*>(input),
+        reinterpret_cast<const float*>(gamma),
+        reinterpret_cast<const float*>(beta),
+        reinterpret_cast<float*>(output),
         batch_size,
         num_channels,
         num_groups,
@@ -109,8 +97,7 @@ void test_tmp_kernel_opt(
         min_val,
         max_val
     );
-    
-    // Free temporary buffers
+
     cudaFree(gamma);
     cudaFree(beta);
 }

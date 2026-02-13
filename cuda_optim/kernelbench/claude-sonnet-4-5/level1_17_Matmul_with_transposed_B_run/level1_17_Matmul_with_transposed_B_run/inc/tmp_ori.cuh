@@ -55,18 +55,23 @@ void test_tmp_kernel_opt(
     int in_elems, int out_elems,
     cudaStream_t stream)
 {
+    // Interpret inputs as matrices A and B
+    // A: (M, K) -> in_batch = M, in_width = K (assuming in_height=in_channels=1)
+    // B: (N, K) -> out_batch = N, in_width = K (same K)
+    // Output C: (M, N)
+
     int M = in_batch;
-    int K = in_height;
+    int K = in_width;
     int N = out_batch;
-    
+
     dim3 block_size(TILE_SIZE, TILE_SIZE);
     dim3 grid_size((N + TILE_SIZE - 1) / TILE_SIZE, 
                    (M + TILE_SIZE - 1) / TILE_SIZE);
-    
+
     matmul_kernel_opt<<<grid_size, block_size, 0, stream>>>(
-        input,
-        input + in_elems / 2,
-        output,
+        reinterpret_cast<const float*>(input),
+        reinterpret_cast<const float*>(output + M * K), // B starts after A in input buffer
+        reinterpret_cast<float*>(output),
         M, K, N
     );
 }
