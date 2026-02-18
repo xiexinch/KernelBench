@@ -6,6 +6,7 @@ import queue
 import re
 import shutil
 import subprocess
+import warnings
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, asdict
@@ -19,6 +20,14 @@ from tqdm import tqdm
 
 
 load_dotenv()
+
+# Suppress known benign pydantic serializer warnings emitted by some LiteLLM
+# providers when response schemas differ between streaming/non-streaming shapes.
+warnings.filterwarnings(
+    "ignore",
+    message=r"Pydantic serializer warnings:.*",
+    category=UserWarning,
+)
 
 try:
     from litellm import completion
@@ -36,6 +45,7 @@ LEVEL_PROBLEMS = {
     "2": list(range(1, 101)),
     "3": list(range(1, 51)),
     "4": list(range(1, 21)),
+    "level4_expand": list(range(1, 21)),
 }
 
 TASK_NAME_MAPPING = {
@@ -138,7 +148,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--run_name", type=str, required=True)
     parser.add_argument("--model", type=str, required=True)
-    parser.add_argument("--level", type=str, default="1,2,3,4")
+    parser.add_argument("--level", type=str, default="1,2,3,4,level4_expand")
     parser.add_argument("--failed_results", type=str, default=None)
     parser.add_argument("--skip_eval_check", action="store_true")
     parser.add_argument("--max_iter", type=int, default=10)
@@ -404,26 +414,55 @@ def extract_cpp_from_response(text: str) -> str:
     return text
 
 
-def _safe_json_dump(obj: Any) -> Any:
+def _safe_primitive(obj: Any) -> Any:
     if obj is None:
         return None
     if isinstance(obj, (str, int, float, bool)):
         return obj
     if isinstance(obj, dict):
-        return {str(k): _safe_json_dump(v) for k, v in obj.items()}
+        return {str(k): _safe_primitive(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
-        return [_safe_json_dump(x) for x in obj]
-    if hasattr(obj, "model_dump"):
-        try:
-            return _safe_json_dump(obj.model_dump())
-        except Exception:
-            pass
-    if hasattr(obj, "__dict__"):
-        try:
-            return _safe_json_dump(vars(obj))
-        except Exception:
-            pass
+        return [_safe_primitive(x) for x in obj]
     return str(obj)
+
+
+def extract_response_summary(response: Any) -> dict[str, Any]:
+    """
+    Extract stable, minimal response fields without calling pydantic serializers.
+    This avoids PydanticSerializationUnexpectedValue warnings from model_dump().
+    """
+    if response is None:
+        return {}
+
+    summary: dict[str, Any] = {
+        "id": _safe_primitive(getattr(response, "id", None)),
+        "model": _safe_primitive(getattr(response, "model", None)),
+        "created": _safe_primitive(getattr(response, "created", None)),
+        "usage": _safe_primitive(getattr(response, "usage", None)),
+        "choices": [],
+    }
+
+    choices = getattr(response, "choices", None) or []
+    for c in choices:
+        msg = getattr(c, "message", None)
+        choice_item = {
+            "index": _safe_primitive(getattr(c, "index", None)),
+            "finish_reason": _safe_primitive(getattr(c, "finish_reason", None)),
+            "message": {
+                "role": _safe_primitive(getattr(msg, "role", None)),
+                "content": _safe_primitive(getattr(msg, "content", None)),
+                "reasoning_content": _safe_primitive(
+                    getattr(msg, "reasoning_content", None)
+                    or getattr(msg, "reasoning", None)
+                    or getattr(msg, "thinking", None)
+                ),
+                "provider_specific_fields": _safe_primitive(
+                    getattr(msg, "provider_specific_fields", None)
+                ),
+            },
+        }
+        summary["choices"].append(choice_item)
+    return summary
 
 
 def extract_reasoning_content(response: Any) -> str:
@@ -481,7 +520,7 @@ def write_llm_trace(
         "raw_content": raw_content,
         "reasoning_content": reasoning_content,
         "error": error_message,
-        "response": _safe_json_dump(response_obj),
+        "response": extract_response_summary(response_obj),
     }
     trace_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -1008,10 +1047,60 @@ def convert_to_task_dir(args, task: TaskState, common_h: Path, kernelbench_base:
     inc_path.mkdir(parents=True, exist_ok=True)
     src_path.mkdir(parents=True, exist_ok=True)
 
-    (inc_path / "tmp_ori.cuh").write_text(convert_to_opt(code), encoding="utf-8")
-    (inc_path / "tmp_use.cuh").write_text(convert_to_opt(code), encoding="utf-8")
-    (inc_path / "tmp_check.cuh").write_text(convert_to_check(code), encoding="utf-8")
-    shutil.copy2(common_h, inc_path / "common.h")
+    tmp_ori_code = convert_to_opt(code)
+    tmp_use_code = convert_to_opt(code)
+    tmp_check_code = convert_to_check(code)
+
+    prompt = Template(
+        """You are a CUDA code expert with deep expertise in C++ project development and naming conflict resolution. 
+
+Please analyze the following code snippets to identify **identically named functions, variables, and other identifiers** (e.g., macros, structs, enums) that may cause naming collisions. To prevent naming conflicts in a C++ project, extract all code fragments that contain duplicate definitions or naming conflicts, with the following critical restriction:
+
+### Critical Extraction Restriction:
+- Only extract **functional methods** (e.g., methods marked with `__device__` such as `float xxx()`)
+- **Exclude** all kernel functions marked with `__global__`, as well as the entry functions `test_tmp_kernel_opt` and `test_tmp_kernel_opi` (do not extract these at all).
+
+### Output Requirements:
+- Write the extracted conflicting code snippets inside the block: ```cpp {extracted_code} ```
+- If no naming conflicts are found (after applying the above restriction), reply with the exact word: null
+
+### Code Snippets to Check for Naming Conflicts:
+```cpp
+$tmp_ori_code
+$tmp_use_code
+$tmp_check_code
+    """
+    ).substitute(
+        tmp_ori_code=tmp_ori_code,
+        tmp_use_code=tmp_use_code,
+        tmp_check_code=tmp_check_code,
+    )
+    kwargs = {
+        "model": args.model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": args.max_tokens,
+        "temperature": args.temperature,
+        "timeout": args.api_timeout,
+    }
+
+    response = completion(**kwargs)
+    raw = response.choices[0].message.content
+    if raw == "null":
+        (inc_path / "tmp_ori.cuh").write_text(tmp_ori_code, encoding="utf-8")
+        (inc_path / "tmp_use.cuh").write_text(tmp_use_code, encoding="utf-8")
+        (inc_path / "tmp_check.cuh").write_text(tmp_check_code, encoding="utf-8")
+        shutil.copy2(common_h, inc_path / "common.h")
+    else:
+        extracted_code = extract_cpp_from_response(raw)
+        tmp_ori_code = tmp_ori_code.replace(extracted_code, "\n")
+        tmp_use_code = tmp_use_code.replace(extracted_code, "\n")
+        tmp_check_code = tmp_check_code.replace(extracted_code, "\n")
+        common_h_code = common_h.read_text(encoding="utf-8")
+        common_h_code += "\n" + extracted_code
+        (inc_path / "tmp_ori.cuh").write_text(tmp_ori_code, encoding="utf-8")
+        (inc_path / "tmp_use.cuh").write_text(tmp_use_code, encoding="utf-8")
+        (inc_path / "tmp_check.cuh").write_text(tmp_check_code, encoding="utf-8")
+        (inc_path / "common.h").write_text(common_h_code, encoding="utf-8")
 
     sig = parse_test_sig(code)
     input_size, output_size = get_default_sizes(task.level)

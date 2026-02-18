@@ -227,6 +227,11 @@ SERVER_PRESETS = {
         "top_p": 0.95,
         "top_k": 40,
     },
+    "dashscope": {
+        "model_name": "dashscope/qwen3-max-2026-01-23",
+        "temperature": 0.7,
+        "max_tokens": 65536,
+    },
 }
 
 
