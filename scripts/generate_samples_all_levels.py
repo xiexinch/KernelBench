@@ -8,6 +8,7 @@ Each script is independent; level list logic is defined locally.
 from typing import Optional
 
 import os
+import sys
 import pydra
 
 from kernelbench.dataset import construct_kernelbench_dataset
@@ -42,6 +43,43 @@ def get_all_level_specs(
     elif include_level4_expand and dataset_src != "local":
         raise ValueError("level4_expand is only supported with dataset_src=local")
     return specs
+
+
+def _run_dir_has_existing_kernels(run_dir: str) -> bool:
+    """检查 run 目录下是否已有生成的 kernel 文件（用于判断是否为中断后重跑）。"""
+    if not os.path.isdir(run_dir):
+        return False
+    for name in os.listdir(run_dir):
+        if name.endswith("_kernel.py") and name.startswith("level_"):
+            return True
+    return False
+
+
+def _ask_resume(run_dir: str) -> bool:
+    """
+    当检测到已有结果时询问用户是否 resume（跳过已生成、只补全未生成的）。
+    返回 True 表示 resume，False 表示不 resume（用户应使用新 run_name 重新跑）。
+    非交互环境（非 TTY）下默认 resume，不阻塞。
+    """
+    if not sys.stdin.isatty():
+        print(
+            f"Run directory already exists with existing kernels: {run_dir}. "
+            "Non-interactive mode: resuming (skip existing, generate missing)."
+        )
+        return True
+    print(f"\n⚠️  Run directory already exists: {run_dir}")
+    print("   Previous run may have been interrupted. Existing kernels will be skipped if you resume.")
+    while True:
+        try:
+            answer = input("   Resume (skip existing, only generate missing)? [Y/n]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.")
+            sys.exit(1)
+        if answer in ("", "y", "yes"):
+            return True
+        if answer in ("n", "no"):
+            return False
+        print("   Please enter Y or n.")
 
 
 class GenerationAllLevelsConfig(GenerationConfig):
@@ -141,11 +179,16 @@ def main(config: GenerationAllLevelsConfig):
 
     run_dir = os.path.join(config.runs_dir, config.run_name)
     run_exists = os.path.exists(run_dir)
-    if run_exists:
-        print(f"\n⚠️  WARNING: Run directory already exists: {run_dir}")
-        print(
-            "   Existing kernels will be skipped. Use a different run_name for a fresh run.\n"
-        )
+    if run_exists and _run_dir_has_existing_kernels(run_dir):
+        if not _ask_resume(run_dir):
+            print(
+                "   To start a fresh run, use a different run_name (e.g. run_name=my_run_v2). Exiting.\n"
+            )
+            sys.exit(0)
+        print("   Resuming: will skip already generated kernels.\n")
+    elif run_exists:
+        print(f"\n⚠️  Run directory already exists: {run_dir}")
+        print("   Existing kernels will be skipped. Use a different run_name for a fresh run.\n")
     os.makedirs(run_dir, exist_ok=True)
     save_dict = config.to_dict()
     save_dict["level"] = "all"
