@@ -158,6 +158,93 @@ python3 scripts/generate_samples_all_levels.py dataset_src=local run_name=my_run
 
 ---
 
+### generate_samples_multiturn_all_levels.py
+
+参考 Kevin 论文（arXiv:2507.11948）提出的**多轮生成算子**流程：每个 (problem, sample) 会进行多轮迭代，按「生成 → 评估执行 → 反馈 → refine」循环若干轮（`max_turns`），并将上一轮的评估结果作为下一轮 prompt 的反馈上下文。该脚本同样支持一次生成所有 level，并支持 resume（已生成的 kernel 会被跳过）。
+
+**使用方法:**
+
+```bash
+python3 scripts/generate_samples_multiturn_all_levels.py dataset_src=<src> run_name=<name> server_type=<type>
+```
+
+**新增参数（其余参数与 generate_samples_all_levels.py / generate_samples.py 一致）:**
+
+| 参数 | 类型 | 必需 | 默认值 | 描述 |
+|------|------|------|--------|------|
+| `level` | str/int | 否 | "all" | 为 "all" 时跑全部 level；为 1/2/3/4 时**只跑该 level**（配合 subset 可只测一道题） |
+| `max_turns` | int | 否 | 4 | 每个 (problem, sample) 的最大 refine 轮数 |
+| `early_stop_on_correct` | bool | 否 | True | 若为 True，首次得到正确 kernel 即停止后续轮次 |
+
+**说明:**
+
+- **评估与反馈**：每轮会调用 `kernelbench.eval.eval_kernel_against_ref`（编译/运行/正确性/速度），并将结果格式化为反馈附加到下一轮 prompt（Kevin 风格 “previous attempts”）。
+- **并行**：该脚本会在每个 worker 内串行执行一个 (problem, sample) 的多轮；由于编译与 GPU 评估较重，默认 `num_workers=1` 更稳（可自行调整）。
+- **resume**：若 `runs/<run_name>/level_<level>_problem_<id>_sample_<sid>_kernel.py` 已存在，则跳过该项。
+
+**输出文件（每个 problem/sample 一组）：**
+- `level_<label>_problem_<id>_sample_<sid>_kernel.py`：最终采用的 kernel（最后一轮）。
+- `level_<label>_problem_<id>_sample_<sid>_turn_<n>_kernel.py`：第 n 轮生成的 .py 脚本（n 从 0 开始）。
+- `level_<label>_problem_<id>_sample_<sid>_conversation.json`：多轮对话与每轮性能。结构为 `messages`（system/user/assistant 交替）+ `turn_metrics`（每轮：`compiled`、`correctness`、`speedup`、`ref_runtime_us`、`runtime_us`、`error` 等）。
+
+**流程图（脚本整体执行流程）:**
+
+```mermaid
+flowchart TD
+  Start[Start] --> Main[main(config)]
+  Main --> InitServer[create_inference_server_from_presets]
+  Main --> LevelLoop[for_each_level_spec]
+  LevelLoop --> BuildDataset[construct_kernelbench_dataset]
+  BuildDataset --> BuildQueue[build_problems_to_run_skip_existing]
+  BuildQueue --> ThreadPool[maybe_multithread]
+  ThreadPool --> Launcher[generate_sample_multiturn_launcher]
+  Launcher --> MultiTurn[generate_sample_multiturn_single]
+  MultiTurn --> TurnLoop[for_turn_in_max_turns]
+  TurnLoop --> Prompt[build_multiturn_prompt]
+  Prompt --> Infer[inference_server(prompt)]
+  Infer --> Extract[extract_first_code]
+  Extract --> StaticCheck[validate_kernel_static]
+  StaticCheck --> Eval[_eval_with_retries->eval_kernel_against_ref]
+  Eval --> Feedback[format_feedback_from_eval_result]
+  Feedback --> TurnLoop
+  TurnLoop --> Save[write_final_kernel_py]
+  Save --> Done[Done]
+```
+
+**方法调用关系（核心函数）:**
+
+```mermaid
+flowchart LR
+  Main[main] --> MT[maybe_multithread]
+  MT --> L[generate_sample_multiturn_launcher]
+  L --> S[generate_sample_multiturn_single]
+  S --> P0[get_prompt_for_backend/get_custom_prompt]
+  S --> P1[build_multiturn_prompt]
+  P1 --> F[format_feedback_from_eval_result]
+  S --> X[extract_first_code]
+  S --> C[validate_kernel_static]
+  S --> E[_eval_with_retries]
+  E --> ER[eval_kernel_against_ref]
+```
+
+**示例:**
+
+```bash
+# 生成 level 1～4，多轮 refine（默认 max_turns=4）
+python3 scripts/generate_samples_multiturn_all_levels.py dataset_src=huggingface run_name=my_run server_type=deepseek
+
+# 更长的 refine 轮数
+python3 scripts/generate_samples_multiturn_all_levels.py dataset_src=huggingface run_name=my_run server_type=deepseek max_turns=8
+
+# 不提前停止（即使已经正确也继续尝试更快）
+python3 scripts/generate_samples_multiturn_all_levels.py dataset_src=huggingface run_name=my_run server_type=deepseek early_stop_on_correct=False
+
+# 只测一道题：仅 Level 1 的 problem 1，完成多轮后再结束（不跑 Level 2/3/4）
+python3 scripts/generate_samples_multiturn_all_levels.py dataset_src=huggingface run_name=my_run server_type=deepseek level=1 subset="(1,1)"
+```
+
+---
+
 ### generate_samples_retry.py
 
 仅对之前运行中失败或缺失的任务重新采样生成 kernel。

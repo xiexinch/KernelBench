@@ -637,8 +637,14 @@ def eval_kernel_against_ref(
     # We are working on preventing excessive speedup issues
     ##############################################################
 
-    if measure_performance and check_for_excessive_speedup:  # experimental: hence able to shut off codepath if needed
-    
+    # Only run when correct to avoid touching GPU again after crash (e.g. illegal memory access)
+    if (
+        measure_performance
+        and check_for_excessive_speedup
+        and kernel_exec_result
+        and kernel_exec_result.correctness
+        and kernel_exec_result.runtime > 0
+    ):
         if verbose:
             print("[Eval] Additional checks to flag excessive speedup")
 
