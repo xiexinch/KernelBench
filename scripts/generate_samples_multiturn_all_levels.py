@@ -4,6 +4,10 @@ Multi-turn batch generation for all KernelBench levels (Kevin-style).
 Reference workflow: generate -> execute/evaluate -> feedback -> refine, for multiple turns.
 This script mirrors `scripts/generate_samples_all_levels.py` (all levels + resume) but
 adds multi-turn refinement per (level, problem, sample).
+
+LLM 请求经 create_inference_server_from_presets -> query_server。通过网关访问 vLLM 时，
+在 .env 中设置 HOSTED_VLLM_API_BASE、HOSTED_VLLM_HOST（及可选 HOSTED_VLLM_API_KEY）
+即可自动带上 Host 头与 api_base；server_type=local 时可通过 LOCAL_SERVER_HOST 指定 Host。
 """
 
 from __future__ import annotations
@@ -606,6 +610,7 @@ def main(config: GenerationMultiturnAllLevelsConfig):
     print(f"Starting Multi-turn Batch Generation with config: {config}")
     print(f"Levels to generate: {[s[2] for s in level_specs]}")
 
+    # 所有请求经 query_server，Host/api_base 由 .env 的 HOSTED_VLLM_*、LOCAL_SERVER_HOST 控制
     inference_server = create_inference_server_from_presets(
         server_type=config.server_type,
         model_name=config.model_name,

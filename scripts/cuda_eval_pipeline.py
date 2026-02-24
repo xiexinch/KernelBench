@@ -34,6 +34,11 @@ try:
 except ImportError:
     completion = None
 
+try:
+    from kernelbench.utils import inject_hosted_vllm_kwargs
+except ImportError:
+    inject_hosted_vllm_kwargs = lambda model_name, kwargs: None
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RUNS_ROOT = REPO_ROOT / "runs"
 CUDA_EVAL_ROOT = REPO_ROOT / "cuda_eval_code"
@@ -1034,6 +1039,7 @@ def generate_for_task(args, task: TaskState, llm_trace_dir: Path | None):
         }
         if args.api_key:
             kwargs["api_key"] = args.api_key
+        inject_hosted_vllm_kwargs(args.model, kwargs)
         response = completion(**kwargs)
         raw = response.choices[0].message.content
         reasoning = extract_reasoning_content(response)
@@ -1153,7 +1159,7 @@ $tmp_check_code
         "temperature": args.temperature,
         "timeout": args.api_timeout,
     }
-
+    inject_hosted_vllm_kwargs(args.model, kwargs)
     response = completion(**kwargs)
     raw = response.choices[0].message.content
     if raw == "null":

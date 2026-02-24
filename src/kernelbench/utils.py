@@ -36,6 +36,25 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 SGLANG_KEY = os.environ.get("SGLANG_API_KEY")
 
 
+def inject_hosted_vllm_kwargs(model_name: str, kwargs: dict) -> None:
+    """
+    当使用 hosted_vllm 且配置了 HOSTED_VLLM_API_BASE / HOSTED_VLLM_HOST / HOSTED_VLLM_API_KEY 时，
+    向 kwargs 注入 api_base、extra_headers（Host）、api_key，供 litellm.completion() 使用。
+    """
+    if "hosted_vllm/" not in model_name.lower():
+        return
+    api_base = os.environ.get("HOSTED_VLLM_API_BASE")
+    if api_base:
+        kwargs["api_base"] = api_base
+    host_header = os.environ.get("HOSTED_VLLM_HOST")
+    if host_header:
+        kwargs["extra_headers"] = kwargs.get("extra_headers") or {}
+        kwargs["extra_headers"]["Host"] = host_header
+    vllm_key = os.environ.get("HOSTED_VLLM_API_KEY")
+    if vllm_key:
+        kwargs["api_key"] = vllm_key
+
+
 ########################################################
 # Inference Helpers
 ########################################################
@@ -80,8 +99,16 @@ def query_server(
     # Local Server (SGLang, vLLM, Tokasaurus) - special handling
     if server_type == "local":
         url = f"http://{server_address}:{server_port}"
+        # 通过网关访问时需指定 Host 头，可设置环境变量 LOCAL_SERVER_HOST
+        default_headers = None
+        if os.environ.get("LOCAL_SERVER_HOST"):
+            default_headers = {"Host": os.environ.get("LOCAL_SERVER_HOST")}
         client = OpenAI(
-            api_key=SGLANG_KEY, base_url=f"{url}/v1", timeout=None, max_retries=0
+            api_key=SGLANG_KEY,
+            base_url=f"{url}/v1",
+            timeout=None,
+            max_retries=0,
+            default_headers=default_headers,
         )
         if isinstance(prompt, str):
             response = client.completions.create(
@@ -159,6 +186,8 @@ def query_server(
             # top_k is not supported by OpenAI models
             if "openai/" not in model_name.lower() and "gpt" not in model_name.lower():
                 completion_kwargs["top_k"] = top_k
+
+        inject_hosted_vllm_kwargs(model_name, completion_kwargs)
 
         # 让 LiteLLM 丢弃当前 provider 不支持的参数，避免 UnsupportedParamsError（如 Anthropic 不支持 reasoning_effort）
         litellm.drop_params = True
