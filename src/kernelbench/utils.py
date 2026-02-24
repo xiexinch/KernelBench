@@ -20,7 +20,8 @@ from importlib.resources import files, as_file
 
 # API clients
 from openai import OpenAI
-from litellm import completion, drop_params
+import litellm
+from litellm import completion
 
 import numpy as np
 from contextlib import contextmanager
@@ -138,9 +139,10 @@ def query_server(
 
         # Reasoning models (o1, o3, etc.) don't support standard sampling params
         if is_reasoning_model:
-            # Note: o1/o3 models don't support temperature, top_p, top_k
-            # LiteLLM will pass through reasoning_effort for OpenAI o1/o3 models
-            if reasoning_effort:
+            # reasoning_effort 仅 OpenAI o1/o3 支持；Anthropic 等会报 UnsupportedParamsError
+            if reasoning_effort and (
+                "openai" in model_name.lower() or "o1" in model_name or "o3" in model_name
+            ):
                 completion_kwargs["reasoning_effort"] = reasoning_effort
             # Claude extended thinking uses "thinking" parameter with dict structure
             # Format: {"type": "enabled", "budget_tokens": <int>}
@@ -158,6 +160,8 @@ def query_server(
             if "openai/" not in model_name.lower() and "gpt" not in model_name.lower():
                 completion_kwargs["top_k"] = top_k
 
+        # 让 LiteLLM 丢弃当前 provider 不支持的参数，避免 UnsupportedParamsError（如 Anthropic 不支持 reasoning_effort）
+        litellm.drop_params = True
         response = completion(**completion_kwargs)
 
         # output processing
@@ -208,7 +212,6 @@ SERVER_PRESETS = {
         "model_name": "anthropic/claude-3-7-sonnet-20250219",
         "temperature": 0.8,
         "max_tokens": 8192,
-        "drop_params": True,
     },
     "openai": {
         "model_name": "gpt-4o-2024-08-06",
