@@ -20,7 +20,7 @@ from importlib.resources import files, as_file
 
 # API clients
 from openai import OpenAI
-from litellm import completion
+from litellm import completion, drop_params
 
 import numpy as np
 from contextlib import contextmanager
@@ -208,6 +208,7 @@ SERVER_PRESETS = {
         "model_name": "anthropic/claude-3-7-sonnet-20250219",
         "temperature": 0.8,
         "max_tokens": 8192,
+        "drop_params": True,
     },
     "openai": {
         "model_name": "gpt-4o-2024-08-06",

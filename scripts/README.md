@@ -129,20 +129,30 @@ python3 scripts/generate_samples.py dataset_src=huggingface level=1 run_name=my_
 
 ### generate_samples_all_levels.py
 
-一次生成**所有 level**（1、2、3、4；可选 level4_expand）的算子，**无需指定 level 参数**。与 generate_samples.py 的区别：不传 level，默认对所有 level 依次生成；支持 `include_level4_expand`（仅 dataset_src=local 时有效）。
+一次生成**所有 level**（1、2、3、4；可选 level4_expand）的算子，**无需指定 level 参数**。
+
+**与 generate_samples.py 的区别：**
+
+- 不传 `level`，脚本固定为 `level=all`，按 level 顺序依次生成（1 → 2 → 3 → 4，可选 level4_expand）。
+- 支持 `include_level4_expand`（仅当 `dataset_src=local` 时有效）。
+- 支持 **`problem_subset_file`**：只对指定文件中的题目生成 kernel；文件每行一个 `level_<level>_problem_<id>`（如 `level_level1_problem_1`、`level_level4_expand_problem_3`）。可与 `export_best_success.py --save_failed` 生成的 `failed_problem.txt` 配合，仅对“评测未通过”的题目重跑生成（见下方“仅对 failed 题目生成”示例）。
+- 若 run 目录已存在且含 kernel，会询问是否 **resume**（跳过已生成、只补全未生成）；非交互环境下默认 resume。
+
+**题目筛选优先级：** 若提供了 `problem_subset_file`，则只生成该文件中出现的 (level, problem_id)；否则若 `subset != (None, None)` 则按区间筛选；否则生成该 level 下全部题目。
 
 **使用方法:**
 
 ```bash
-python3 scripts/generate_samples_all_levels.py dataset_src=<src> run_name=<name> server_type=<type>
+python3 scripts/generate_samples_all_levels.py dataset_src=<src> run_name=<name> server_type=<type> [include_level4_expand=true] [problem_subset_file=<path>]
 ```
 
-**参数列表:** 与 generate_samples.py 基本相同，但以下不同：
+**参数列表:** 与 generate_samples.py 基本相同，额外/不同如下：
 
 | 参数 | 类型 | 必需 | 默认值 | 描述 |
 |------|------|------|--------|------|
 | `level` | str | 否 | "all" | 本脚本固定为 "all"，不可指定单 level |
 | `include_level4_expand` | bool | 否 | False | 是否包含 level4_expand（仅 dataset_src=local 时有效） |
+| `problem_subset_file` | str | 否 | None | 仅生成该文件中的题目；每行格式 `level_<level>_problem_<id>` |
 
 其余参数（dataset_src、run_name、subset、num_workers、server_type、model_name 等）与 generate_samples.py 一致。
 
@@ -153,7 +163,10 @@ python3 scripts/generate_samples_all_levels.py dataset_src=<src> run_name=<name>
 python3 scripts/generate_samples_all_levels.py dataset_src=huggingface run_name=my_run server_type=deepseek
 
 # 本地数据源并包含 level4_expand
-python3 scripts/generate_samples_all_levels.py dataset_src=local run_name=my_run server_type=deepseek include_level4_expand=True
+python3 scripts/generate_samples_all_levels.py dataset_src=local run_name=my_run server_type=deepseek include_level4_expand=true
+
+# 仅对 failed_problem 列表中的题目生成（需先由 export_best_success.py 生成 failed_problem.txt，或使用 run_generate_failed_problem.sh）
+python3 scripts/generate_samples_all_levels.py dataset_src=local run_name=retry_failed server_type=deepseek problem_subset_file=./best_success_out/failed_problem.txt
 ```
 
 ---
@@ -810,7 +823,31 @@ python3 scripts/verify_level4_extend_precision.py --device cpu
 
 ### cuda_eval_pipeline.py
 
-端到端 CUDA 评估管道，从 kernel 生成到原生 CUDA 评估。
+**用途概述**
+
+本脚本是一条「生成 → 转 C++ CUDA → 编译运行 → 纠错重试」的流水线，主要做三件事：
+
+1. **任务来源**：从 `runs/<run_name>` 里读取**已通过 PyTorch 侧评测**的 kernel（或从失败结果文件指定题目），对应 `runs/<run_name>/level_<level>_problem_<id>_sample_0_kernel.py`。
+2. **转成可评测的 C++ CUDA 工程**：用 **LiteLLM** 调用大模型，根据 kernel 的宏、`__global__` 和 `torch::Tensor` 入口，生成符合 kernelbench 约定的**纯 C++ CUDA 入口**（如 `test_tmp_kernel_ori(...)`），不包含 torch/pybind；再写入 `cuda_optim/kernelbench/<namespace>/`，并生成 `tmp_test.cu` 做 ori/opt 对比与计时。
+3. **本地编译 + GPU 运行 + 迭代修错**：用 `nvcc` 编译、在 GPU 上跑测试，从 stdout 解析 `<precision>`、`<runtime_ratio>` 等；若编译或运行失败，把错误信息反馈给 LLM 重生成，最多重试 `--max_iter` 次。
+
+因此，它把「runs 里已通过的 PyTorch kernel」变成「可在 kernelbench 风格 C++ 环境里评测正确性与加速比」的流程，并支持用 LLM 自动修编译/运行错误。
+
+**数据流与目录约定**
+
+- **输入**：`runs/<run_name>/`（kernel 源文件，以及可选的 `eval_results.json` 用于筛「已通过」题目）；可选 `--failed_results` 指定一个结果文件，只处理其中标记为 COMPILE_ERROR / RUNTIME_ERROR / TIMEOUT 的 level+problem。
+- **输出**：`cuda_eval_code/<run_name>/`（每个任务生成的 C++ 入口）；`cuda_optim/kernelbench/<namespace>/`（按 kernelbench 目录结构展开的工程）；`--report_dir` 下 `pipeline_reports/<run_name>_<timestamp>/`（报告、日志、checkpoint、以及可选的 LLM 对话 trace）。
+
+题目元信息（problem 名称等）从 `KernelBench/`（`KERNELBENCH_META_ROOT`）读取；`common.h` 可从 `--common_h` 指定，不指定则从 `cuda_optim/kernelbench/` 下已有任务自动检测。
+
+**任务收集逻辑**
+
+- **未指定 `--failed_results`**：读取 `runs/<run_name>/eval_results.json`（若存在），对 `--level` 中的每个 level 只保留**已编译通过且 correctness 为 True** 的 problem（sample_id=0）；若加 `--skip_eval_check` 则不做这层过滤，按 level 全量跑。
+- **指定 `--failed_results`**：解析该文件中的 `level(\d+)_(\d+)_` 及 COMPILE_ERROR/RUNTIME_ERROR/TIMEOUT 等行，得到「level → problem_id 列表」，只对这些失败题跑流水线。
+
+**单任务流水线（概要）**
+
+对每个 pending 任务：从 run 目录抽取 kernel 的 macro / `__global__` / 入口 → 用 LLM 生成 C++ CUDA 入口 → 后处理（去掉 torch/pybind、统一 `__global__` 等）→ 写入 cuda_eval_code 与 kernelbench 工程 → 可选再调 LLM 解决 ori/opt/check 命名冲突 → 生成 `tmp_test.cu` → `nvcc` 编译 → 在 GPU 上运行 → 解析 `<precision>`、`<runtime_ratio>`；失败则把错误写入 prompt 重试，直到成功或达到 `--max_iter`。报告与 checkpoint 会保存每次 attempt、日志路径、precision、runtime_ratio 等，便于排查和 `--resume`。
 
 **使用方法:**
 
@@ -818,36 +855,38 @@ python3 scripts/verify_level4_extend_precision.py --device cpu
 python3 scripts/cuda_eval_pipeline.py --run_name <name> --model <model> [options]
 ```
 
-**参数列表:**
+**常用参数:**
 
 | 参数 | 类型 | 必需 | 默认值 | 描述 |
 |------|------|------|--------|------|
-| `--run_name` | str | 是 | - | 运行名称 |
-| `--model` | str | 是 | - | 使用的模型 |
-| `--level` | str | 否 | "1,2,3,4" | 级别（逗号分隔） |
-| `--failed_results` | str | 否 | None | 失败结果文件路径 |
-| `--skip_eval_check` | bool | 否 | False | 跳过 eval 结果检查 |
-| `--max_iter` | int | 否 | 10 | 每任务最大迭代次数 |
-| `--parallel_gen` | int | 否 | 4 | 并行生成任务数 |
-| `--compile_workers` | int | 否 | CPU//2 | 并行编译工作线程数 |
-| `--num_gpus` | int | 否 | 0 | GPU 数量（0=自动检测） |
-| `--nvcc_arch` | str | 否 | "sm_89" | NVCC 架构 |
-| `--timeout` | int | 否 | 120 | 运行时超时（秒） |
-| `--max_tokens` | int | 否 | 131072 | 最大生成令牌数 |
-| `--temperature` | float | 否 | 0.0 | 采样温度 |
+| `--run_name` | str | 是 | - | 运行名称（runs 下的 run 目录名） |
+| `--model` | str | 是 | - | LiteLLM 的 model 名（如 openai/xxx、claude-3-5-sonnet 等） |
+| `--level` | str | 否 | "1,2,3,4,level4_expand" | 要跑的 level，逗号分隔 |
+| `--failed_results` | str | 否 | None | 仅处理该文件中列出的失败题（按 level+problem 解析） |
+| `--skip_eval_check` | bool | 否 | False | 不依赖 eval_results 过滤，按 level 全量跑 |
+| `--max_iter` | int | 否 | 10 | 每个任务最多用 LLM 重试的次数 |
+| `--parallel_gen` / `--compile_workers` | int | 否 | 4 / CPU//2 | 并行任务数与编译并发 |
+| `--num_gpus` | int | 否 | 0 | 用于跑 binary 的 GPU 数，0 表示自动检测 |
+| `--nvcc_arch` | str | 否 | "sm_89" | nvcc 的 -arch |
+| `--timeout` | int | 否 | 120 | 单次运行 binary 的超时（秒） |
+| `--report_dir` | str | 否 | "scripts/pipeline_reports" | 报告根目录；具体报告在 `<report_dir>/<run_name>_<timestamp>/` |
+| `--resume` | str | 否 | "" | 从已有报告目录恢复（读 checkpoint.json 或 pipeline_report.json） |
+| `--common_h` | str | 否 | "" | common.h 路径；空则自动从 kernelbench 任务里找 |
+| `--kernelbench_namespace` | str | 否 | "" | `cuda_optim/kernelbench/` 下的子目录；空则从 run_name 推导 |
+| `--llm_trace_subdir` / `--disable_llm_trace` | str/bool | 否 | "llm_traces" / False | 是否保存每个任务的 LLM 请求/响应 trace |
 | `--api_timeout` | int | 否 | 120 | LLM API 请求超时（秒） |
-| `--api_key` | str | 否 | None | API 密钥 |
-| `--common_h` | str | 否 | "" | common.h 模板路径 |
-| `--report_dir` | str | 否 | "scripts/pipeline_reports" | 报告目录 |
-| `--resume` | str | 否 | "" | 从现有报告目录恢复 |
-| `--kernelbench_namespace` | str | 否 | "" | 输出命名空间 |
-| `--llm_trace_subdir` | str | 否 | "llm_traces" | LLM 跟踪子目录 |
-| `--disable_llm_trace` | bool | 否 | False | 禁用 LLM 跟踪 |
+| `--api_key` | str | 否 | None | API 密钥（也可通过环境变量） |
+
+**依赖与运行**
+
+- 需要 **LiteLLM**（`pip install litellm`），用于调用各类 LLM API。
+- 需要 **nvcc** 和可用 GPU，以便编译并运行生成的 C++ CUDA 测试。
+- 建议在项目根目录执行。
 
 **示例:**
 
 ```bash
-# 全新运行
+# 全新运行（level 1、2）
 python3 scripts/cuda_eval_pipeline.py --run_name my_cuda_run --model anthropic/claude-sonnet-4 --level 1,2
 
 # 恢复运行
