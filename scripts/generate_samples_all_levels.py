@@ -5,6 +5,7 @@ One run generates kernels for all levels without specifying a level parameter.
 Each script is independent; level list logic is defined locally.
 """
 
+import re
 from typing import Optional
 
 import os
@@ -89,6 +90,34 @@ class GenerationAllLevelsConfig(GenerationConfig):
         super().__init__()
         self.level = "all"
         self.include_level4_expand = False
+        # 可选：仅生成该文件中列出的题目。每行格式 level_<level>_problem_<id>，如 level_level1_problem_1
+        self.problem_subset_file = None
+
+
+def _parse_problem_subset_file(path: str) -> dict[str, set[int]]:
+    """
+    解析 problem_subset_file，每行格式 level_<level>_problem_<id>。
+    返回 {level_label: set(problem_id)}，level_label 与 get_all_level_specs 一致（"1","2","3","4","level4_expand"）。
+    """
+    # level_level1_problem_1 -> ("level1", 1); level_level4_expand_problem_3 -> ("level4_expand", 3)
+    pattern = re.compile(r"level_(level\d|level4_expand)_problem_(\d+)")
+    level_to_ids: dict[str, set[int]] = {}
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            m = pattern.match(line)
+            if not m:
+                continue
+            level_key, pid_str = m.group(1), m.group(2)
+            if level_key == "level4_expand":
+                level_label = "level4_expand"
+            else:
+                level_label = level_key.replace("level", "")  # level1->1, level2->2, ...
+            pid = int(pid_str)
+            level_to_ids.setdefault(level_label, set()).add(pid)
+    return level_to_ids
 
 
 @pydra.main(base=GenerationAllLevelsConfig)
@@ -197,6 +226,17 @@ def main(config: GenerationAllLevelsConfig):
 
     assert config.store_type == "local", "Only local storage is supported."
 
+    problem_subset_by_level = None
+    if getattr(config, "problem_subset_file", None):
+        path = config.problem_subset_file
+        if isinstance(path, str) and path.strip():
+            path = path.strip()
+            if os.path.isfile(path):
+                problem_subset_by_level = _parse_problem_subset_file(path)
+                print(f"仅生成 problem_subset_file 中的题目: {path} (共 {sum(len(s) for s in problem_subset_by_level.values())} 题)")
+            else:
+                raise FileNotFoundError(f"problem_subset_file 不存在: {path}")
+
     total_generated = 0
     total_attempted = 0
     total_failed = 0
@@ -212,7 +252,18 @@ def main(config: GenerationAllLevelsConfig):
         )
         all_problem_ids = dataset.get_problem_ids()
 
-        if config.subset == (None, None):
+        if problem_subset_by_level is not None:
+            allowed_ids = problem_subset_by_level.get(level_label)
+            if not allowed_ids:
+                print(f"Level {level_label}: problem_subset_file 中无该 level，跳过。")
+                continue
+            problem_ids_to_run = [p for p in all_problem_ids if p in allowed_ids]
+            if not problem_ids_to_run:
+                print(
+                    f"Warning: No problems in problem_subset_file for level {level_label}, skipping."
+                )
+                continue
+        elif config.subset == (None, None):
             problem_ids_to_run = all_problem_ids
         else:
             start, end = config.subset
