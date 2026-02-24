@@ -93,8 +93,8 @@ def main():
     )
     parser.add_argument(
         "--eval_results",
-        default="eval_results.json",
-        help="eval_results.json 路径（默认: eval_results.json）",
+        default=None,
+        help="eval_results.json 路径；未指定时使用 --run_dir 内的 eval_results.json",
     )
     parser.add_argument(
         "--run_dir",
@@ -118,8 +118,16 @@ def main():
     )
     args = parser.parse_args()
 
+    eval_results_path = args.eval_results
+    if eval_results_path is None:
+        eval_results_path = os.path.join(args.run_dir, "eval_results.json")
+    if not os.path.isfile(eval_results_path):
+        raise FileNotFoundError(
+            f"未找到 eval_results: {eval_results_path}（可通过 --eval_results 指定路径）"
+        )
+
     export_best_success(
-        eval_results_path=args.eval_results,
+        eval_results_path=eval_results_path,
         run_dir=args.run_dir,
         output_dir=args.output_dir,
         save_failed=args.save_failed,
