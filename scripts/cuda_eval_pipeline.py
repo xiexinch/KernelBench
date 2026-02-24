@@ -117,6 +117,7 @@ class TaskState:
     problem_id: int
     problem_name: str
     task_dir_name: str
+    sample_id: int = 0
     status: str = "pending"  # pending | success | failed
     attempt: int = 0
     generated_code: str = ""
@@ -282,6 +283,37 @@ def load_eval_results(run_name: str) -> dict:
         return {}
 
 
+# 匹配 level_1_problem_28_sample_25_kernel.py 或 level_level4_expand_problem_14_sample_0_kernel.py
+_RE_KERNEL_FILE = re.compile(
+    r"^level_(?:(level4_expand)_problem_(\d+)_sample_(\d+)_kernel\.py"
+    r"|(\d)_problem_(\d+)_sample_(\d+)_kernel\.py)$"
+)
+
+
+def list_kernel_files_from_run_dir(run_name: str) -> list[tuple[str, int, int]]:
+    """
+    扫描 run 目录下所有 *_kernel.py 文件，解析出 (level, problem_id, sample_id)。
+    返回列表，每项对应一个 kernel 文件。
+    """
+    run_dir = RUNS_ROOT / run_name
+    if not run_dir.is_dir():
+        return []
+    out: list[tuple[str, int, int]] = []
+    for name in os.listdir(run_dir):
+        if not name.endswith("_kernel.py") or not name.startswith("level_"):
+            continue
+        m = _RE_KERNEL_FILE.match(name)
+        if not m:
+            continue
+        if m.group(1) is not None:
+            # level4_expand
+            level, pid, sid = "level4_expand", int(m.group(2)), int(m.group(3))
+        else:
+            level, pid, sid = m.group(4), int(m.group(5)), int(m.group(6))
+        out.append((level, pid, sid))
+    return out
+
+
 def get_eval_entry_for_sample(
     eval_results: dict, problem_id: int, sample_id: int = 0
 ) -> dict | None:
@@ -318,7 +350,10 @@ def parse_failed_tasks(results_path: Path) -> dict[str, list[int]]:
 
 
 def get_problem_name(level: str, problem_id: int) -> str:
-    level_dir = KERNELBENCH_META_ROOT / f"level{level}"
+    if level == "level4_expand":
+        level_dir = KERNELBENCH_META_ROOT / "level4_expand"
+    else:
+        level_dir = KERNELBENCH_META_ROOT / f"level{level}"
     if level_dir.exists():
         prefix = f"{problem_id}_"
         for name in os.listdir(level_dir):
@@ -327,10 +362,14 @@ def get_problem_name(level: str, problem_id: int) -> str:
     return f"{problem_id}_unknown"
 
 
-def make_task_dir_name(level: str, problem_name: str) -> str:
+def make_task_dir_name(level: str, problem_name: str, sample_id: int = 0) -> str:
     if level == "1" and problem_name in TASK_NAME_MAPPING:
-        return f"level1_{TASK_NAME_MAPPING[problem_name]}"
-    return f"level{level}_{problem_name}_run".replace("_run_run", "_run")
+        base = f"level1_{TASK_NAME_MAPPING[problem_name]}"
+    else:
+        base = f"level{level}_{problem_name}_run".replace("_run_run", "_run")
+    if sample_id != 0:
+        return f"{base}_sample{sample_id}"
+    return base
 
 
 def extract_code_blocks_by_signature(source: str, signature: str) -> str:
@@ -901,10 +940,41 @@ def collect_tasks(args) -> list[TaskState]:
             selected[lvl] = [x for x in failed.get(lvl, [])]
     else:
         eval_results = load_eval_results(args.run_name)
+        # 若无 eval_results.json：直接使用 run 目录下所有 *_kernel.py 文件建任务
+        if not eval_results:
+            kernel_tuples = list_kernel_files_from_run_dir(args.run_name)
+            by_level: dict[str, list[tuple[int, int]]] = {}
+            for lvl in levels:
+                by_level[lvl] = []
+            for lvl, pid, sid in kernel_tuples:
+                if lvl not in levels:
+                    continue
+                if (pid, sid) not in by_level[lvl]:
+                    by_level[lvl].append((pid, sid))
+            tasks = []
+            for lvl in levels:
+                for (pid, sid) in sorted(by_level[lvl]):
+                    problem_name = get_problem_name(lvl, pid)
+                    tasks.append(
+                        TaskState(
+                            level=lvl,
+                            problem_id=pid,
+                            problem_name=problem_name,
+                            task_dir_name=make_task_dir_name(lvl, problem_name, sid),
+                            sample_id=sid,
+                        )
+                    )
+            return tasks
+        # 有 eval_results：按「已通过」筛选或全量
         for lvl in levels:
+            # 支持多 level 的 eval_results：顶层 key 为 level1, level2, ... level4_expand
+            level_key = lvl if lvl == "level4_expand" else f"level{lvl}"
+            level_data = eval_results.get(level_key, eval_results)
+            if not isinstance(level_data, dict):
+                level_data = eval_results
             for pid in LEVEL_PROBLEMS[lvl]:
                 if not args.skip_eval_check:
-                    entry = get_eval_entry_for_sample(eval_results, pid, 0)
+                    entry = get_eval_entry_for_sample(level_data, pid, 0)
                     if (
                         entry is None
                         or (not entry.get("compiled", False))
@@ -913,7 +983,7 @@ def collect_tasks(args) -> list[TaskState]:
                         continue
                 selected[lvl].append(pid)
 
-    tasks: list[TaskState] = []
+    tasks = []
     for lvl in levels:
         for pid in selected[lvl]:
             problem_name = get_problem_name(lvl, pid)
@@ -922,7 +992,8 @@ def collect_tasks(args) -> list[TaskState]:
                     level=lvl,
                     problem_id=pid,
                     problem_name=problem_name,
-                    task_dir_name=make_task_dir_name(lvl, problem_name),
+                    task_dir_name=make_task_dir_name(lvl, problem_name, 0),
+                    sample_id=0,
                 )
             )
     return tasks
@@ -940,7 +1011,7 @@ def generate_for_task(args, task: TaskState, llm_trace_dir: Path | None):
         return False
 
     macro_code, kernel_code, entry_code = extract_kernel_code(
-        args.run_name, task.level, task.problem_id, 0
+        args.run_name, task.level, task.problem_id, getattr(task, "sample_id", 0)
     )
     if kernel_code is None or entry_code is None:
         task.error_history.append(
@@ -1218,6 +1289,7 @@ def write_report(tasks: list[TaskState], report_base: Path):
                 "problem_id": t.problem_id,
                 "problem_name": t.problem_name,
                 "task_dir_name": t.task_dir_name,
+                "sample_id": getattr(t, "sample_id", 0),
                 "status": t.status,
                 "attempt": t.attempt,
                 "precision": t.precision,
@@ -1267,6 +1339,7 @@ def task_from_dict(data: dict[str, Any]) -> TaskState:
         problem_id=int(data.get("problem_id", 0)),
         problem_name=data.get("problem_name", ""),
         task_dir_name=data.get("task_dir_name", ""),
+        sample_id=int(data.get("sample_id", 0)),
         status=data.get("status", "pending"),
         attempt=int(data.get("attempt", 0)),
         generated_code=data.get("generated_code", ""),
