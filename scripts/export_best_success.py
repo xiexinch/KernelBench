@@ -16,15 +16,25 @@ def load_eval_results(path: str) -> dict:
         return json.load(f)
 
 
+def _level_to_label(level: str) -> str:
+    """rs 的 level 键（level1/level2/.../level4_expand）转为文件名中的 level_label。"""
+    if level == "level4_expand":
+        return "level4_expand"
+    return level.replace("level", "")  # level1->1, level2->2, level3->3, level4->4
+
+
 def compute_best_success_and_failed(rs: dict) -> tuple[dict, list[str]]:
     """
-    与 read.ipynb 中逻辑一致：
+    与 read.ipynb 中逻辑一致，文件名与 generate_samples 一致：
+    - level 1-4: level_<1|2|3|4>_problem_<id>_sample_<id>_kernel.py
+    - level4_expand: level_level4_expand_problem_<id>_sample_<id>_kernel.py
     - best_success_file[level][problem] = 该题最快正确通过的 kernel 文件名，无则为 ''
     - failed_problem = 无任何正确通过的题目 ID 列表，格式 'level_<level>_problem_<id>'
     """
     best_success_file = {}
     failed_problem = []
     for level in rs.keys():
+        level_label = _level_to_label(level)
         best_success_file[level] = {}
         for problem in rs[level].keys():
             if problem not in best_success_file[level]:
@@ -38,7 +48,7 @@ def compute_best_success_and_failed(rs: dict) -> tuple[dict, list[str]]:
                     r = sample.get("runtime")
                     if r is not None and r > 0 and r <= run_time:
                         best_success_file[level][problem] = (
-                            f"level_{level}_problem_{problem}_sample_{sample['sample_id']}_kernel.py"
+                            f"level_{level_label}_problem_{problem}_sample_{sample['sample_id']}_kernel.py"
                         )
                         run_time = r
             if best_success_file[level][problem] == "":
