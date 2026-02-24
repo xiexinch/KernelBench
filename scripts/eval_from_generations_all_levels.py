@@ -283,22 +283,22 @@ def batch_eval_all_levels(
                                 runtime_stats={},
                             )
                         results.append((problem_id, sample_id, result))
-                    except mp.TimeoutError:
+                    except (mp.TimeoutError, TimeoutError):
                         print(
                             f"[WARNING] Evaluation TIMED OUT for problem {problem_id} sample {sample_id}"
                         )
-                        results.append(
-                            (
-                                problem_id,
-                                sample_id,
-                                KernelExecResult(
-                                    compiled=False,
-                                    correctness=False,
-                                    metadata={"error": "Evaluation timed out"},
-                                    runtime=-1.0,
-                                    runtime_stats={},
-                                ),
-                            )
+                        timeout_entry = (
+                            problem_id,
+                            sample_id,
+                            KernelExecResult(
+                                compiled=False,
+                                correctness=False,
+                                metadata={"error": "Evaluation timed out"},
+                                runtime=-1.0,
+                                runtime_stats={},
+                            ),
+                        )
+                        results.append(timeout_entry)
                         remove_cache_dir(
                             config.kernel_eval_build_dir,
                             config.run_name,
@@ -310,18 +310,18 @@ def batch_eval_all_levels(
                         print(
                             f"[ERROR] Evaluation FAILED for problem {problem_id} sample {sample_id}: {e}"
                         )
-                        results.append(
-                            (
-                                problem_id,
-                                sample_id,
-                                KernelExecResult(
-                                    compiled=False,
-                                    correctness=False,
-                                    metadata={"error": str(e)},
-                                    runtime=-1.0,
-                                    runtime_stats={},
-                                ),
-                            )
+                        fail_entry = (
+                            problem_id,
+                            sample_id,
+                            KernelExecResult(
+                                compiled=False,
+                                correctness=False,
+                                metadata={"error": str(e)},
+                                runtime=-1.0,
+                                runtime_stats={},
+                            ),
+                        )
+                        results.append(fail_entry)
                         remove_cache_dir(
                             config.kernel_eval_build_dir,
                             config.run_name,
