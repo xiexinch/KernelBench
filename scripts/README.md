@@ -181,24 +181,72 @@ python3 scripts/generate_samples_all_levels.py dataset_src=local run_name=retry_
 python3 scripts/generate_samples_multiturn_all_levels.py dataset_src=<src> run_name=<name> server_type=<type>
 ```
 
-**新增参数（其余参数与 generate_samples_all_levels.py / generate_samples.py 一致）:**
+**参数列表:**
 
 | 参数 | 类型 | 必需 | 默认值 | 描述 |
 |------|------|------|--------|------|
+| **数据集设置** |
+| `dataset_src` | str | 是 | - | 数据源 ("huggingface" 或 "local") |
+| `dataset_name` | str | 否 | "ScalingIntelligence/KernelBench" | HuggingFace 数据集名称 |
 | `level` | str/int | 否 | "all" | 为 "all" 时跑全部 level；为 1/2/3/4 时**只跑该 level**（配合 subset 可只测一道题） |
+| `include_level4_expand` | bool | 否 | False | 是否包含 level4_expand（仅 dataset_src=local 时有效） |
+| **问题子集** |
+| `subset` | tuple | 否 | (None, None) | 问题子集范围 (start_id, end_id) |
+| `problem_subset_file` | str | 否 | None | 仅生成该文件中的题目；每行格式 `level_<level>_problem_<id>` |
+| **运行设置** |
+| `run_name` | str | 是 | - | 运行名称 |
+| `runs_dir` | str | 否 | "runs" | 运行目录根路径 |
+| `store_type` | str | 否 | "local" | 存储类型（仅支持 "local"） |
+| **采样设置** |
+| `num_samples` | int | 否 | 1 | 每个问题的样本数 |
+| `num_workers` | int | 否 | 1 | 并行工作线程数（建议设为 1，因编译与 GPU 评估较重） |
+| `api_query_interval` | float | 否 | 0.0 | API 查询间隔（秒） |
+| **多轮设置** |
 | `max_turns` | int | 否 | 4 | 每个 (problem, sample) 的最大 refine 轮数 |
 | `early_stop_on_correct` | bool | 否 | True | 若为 True，首次得到正确 kernel 即停止后续轮次 |
+| `max_conversation_segments` | int | 否 | 3 | 因长度限制重启对话的最大次数 |
+| **内存优化设置** |
+| `cuda_memory_cleanup` | bool | 否 | True | 是否在每轮后清理 CUDA 内存 |
+| `cuda_compile_max_jobs` | int | 否 | 1 | CUDA 编译时的最大并行作业数（设为 0 则使用所有核心） |
+| **输入缩放设置** |
+| `scale_down_inputs` | bool | 否 | False | 是否缩小输入尺寸以节省内存（用于 OOM 时） |
+| `scale_max_batch` | int | 否 | 2 | 缩小后的最大 batch size |
+| `scale_max_channels` | int | 否 | 8 | 缩小后的最大 channels |
+| `scale_max_spatial` | int | 否 | 256 | 缩小后的最大空间维度（高/宽） |
+| **推理设置** |
+| `server_type` | str | 否 | None | 服务器类型预设 |
+| `model_name` | str | 否 | None | 模型名称 |
+| `max_tokens` | int | 否 | None | 最大生成令牌数 |
+| `temperature` | float | 否 | 0.0 | 采样温度 |
+| `is_reasoning_model` | bool | 否 | False | 是否为推理模型 (o1, o3, Gemini 2.5 thinking 等) |
+| `reasoning_effort` | str | 否 | "low" | 推理努力程度 ("low", "medium", "high") |
+| `budget_tokens` | int | 否 | 0 | Claude 扩展思考模式的预算令牌 |
+| **后端设置** |
+| `backend` | str | 否 | "cuda" | 后端类型 ("cuda", "triton", "cute", "tilelang", "thunderkittens") |
+| `precision` | str | 否 | "fp32" | 精度 ("fp32", "fp16", "bf16") |
+| `prompt_option` | str | 否 | "one_shot" | 提示选项 ("zero_shot", "one_shot", "few_shot") |
+| `include_hardware_info` | bool | 否 | False | 是否在提示中包含硬件信息 |
+| `hardware_gpu_name` | str | 否 | None | 硬件 GPU 名称（如 "L40S", "H100"） |
+| `custom_prompt_key` | str | 否 | None | 自定义提示键 |
+| **日志设置** |
+| `verbose` | bool | 否 | False | 详细日志输出 |
+| `log_prompt` | bool | 否 | False | 是否记录每轮的 prompt |
+| `log_conversation` | bool | 否 | True | 是否记录完整对话历史 |
+| `conversation_system_prompt` | str | 否 | "" | 对话系统提示词 |
+| `check_kernel` | bool | 否 | True | 是否启用静态代码检查 |
 
 **说明:**
 
-- **评估与反馈**：每轮会调用 `kernelbench.eval.eval_kernel_against_ref`（编译/运行/正确性/速度），并将结果格式化为反馈附加到下一轮 prompt（Kevin 风格 “previous attempts”）。
+- **评估与反馈**：每轮会调用 `kernelbench.eval.eval_kernel_against_ref`（编译/运行/正确性/速度），并将结果格式化为反馈附加到下一轮 prompt（Kevin 风格 "previous attempts"）。
 - **并行**：该脚本会在每个 worker 内串行执行一个 (problem, sample) 的多轮；由于编译与 GPU 评估较重，默认 `num_workers=1` 更稳（可自行调整）。
 - **resume**：若 `runs/<run_name>/level_<level>_problem_<id>_sample_<sid>_kernel.py` 已存在，则跳过该项。
+- **对话重启**：当模型响应达到 token 长度限制时，会自动重启对话并保留历史摘要，最多可重启 `max_conversation_segments` 次。
+- **输入缩放**：当启用 `scale_down_inputs` 时，会自动将大输入张量缩小到指定尺寸，以避免 OOM。
 
-**输出文件（每个 problem/sample 一组）：**
+**输出文件（每个 problem/sample 一组）:**
 - `level_<label>_problem_<id>_sample_<sid>_kernel.py`：最终采用的 kernel（最后一轮）。
 - `level_<label>_problem_<id>_sample_<sid>_turn_<n>_kernel.py`：第 n 轮生成的 .py 脚本（n 从 0 开始）。
-- `level_<label>_problem_<id>_sample_<sid>_conversation.json`：多轮对话与每轮性能。结构为 `messages`（system/user/assistant 交替）+ `turn_metrics`（每轮：`compiled`、`correctness`、`speedup`、`ref_runtime_us`、`runtime_us`、`error` 等）。
+- `level_<label>_problem_<id>_sample_<sid>_conversation.json`：多轮对话与每轮性能。结构为 `messages`（system/user/assistant 交替）+ `turn_metrics`（每轮：`turn`、`segment`、`compiled`、`correctness`、`speedup`、`ref_runtime_us`、`runtime_us`、`error` 等）+ `segment_index` + `segment_summaries`。
 
 **流程图（脚本整体执行流程）:**
 

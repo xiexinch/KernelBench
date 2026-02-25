@@ -442,6 +442,7 @@ def _query_server_with_finish_reason(
     is_reasoning_model = kwargs.get("is_reasoning_model", False)
     reasoning_effort = kwargs.get("reasoning_effort", "low")
     budget_tokens = int(kwargs.get("budget_tokens", 0))
+    verbose = kwargs.get("verbose", False)
     
     # 本地服务器处理
     if server_type == "local":
@@ -487,7 +488,7 @@ def _query_server_with_finish_reason(
             reasoning_content = _extract_reasoning_content(response, is_reasoning_model)
         
         return SimpleNamespace(
-            content=content, 
+            content=content or "", 
             finish_reason=finish_reason,
             reasoning_content=reasoning_content
         )
@@ -532,17 +533,36 @@ def _query_server_with_finish_reason(
             completion_kwargs["extra_headers"] = {"Host": host}
     
     litellm.drop_params = True
-    response = litellm.completion(**completion_kwargs)
+    try:
+        response = litellm.completion(**completion_kwargs)
+    except litellm.ContextWindowExceededError as e:
+        # 上下文窗口超限，返回特殊标记让调用方处理
+        if verbose:
+            print(f"[LLM] ContextWindowExceededError: {e}")
+        return SimpleNamespace(
+            content="",
+            finish_reason="context_window_exceeded",
+            reasoning_content=None,
+            error=str(e)
+        )
+    except Exception as e:
+        # 其他错误也返回特殊标记
+        if verbose:
+            print(f"[LLM] Error: {type(e).__name__}: {e}")
+        return SimpleNamespace(
+            content="",
+            finish_reason="error",
+            reasoning_content=None,
+            error=str(e)
+        )
     
     content = response.choices[0].message.content
     finish_reason = response.choices[0].finish_reason
     reasoning_content = _extract_reasoning_content(response, is_reasoning_model)
     
-    if content is None:
-        raise ValueError(f"LLM 返回空内容。finish_reason: {finish_reason}")
-    
+    # 注意：即使 content 为 None，也返回结果让调用方处理（特别是处理 length 限制的情况）
     return SimpleNamespace(
-        content=content, 
+        content=content or "", 
         finish_reason=finish_reason,
         reasoning_content=reasoning_content
     )
@@ -685,13 +705,18 @@ def eval_with_retries(
 # 错误消息处理
 # =============================================================================
 
-def extract_cuda_error_details(error: str) -> tuple[str, str]:
+def extract_cuda_error_details(error) -> tuple[str, str]:
     """
     从 CUDA 错误中提取错误类型和详细信息。
     
     返回：
         (错误类型描述, 详细错误信息)
     """
+    # 确保 error 是字符串
+    if isinstance(error, Exception):
+        error = str(error)
+    if not isinstance(error, str):
+        return "CUDA 错误", "未知错误"
     error_lower = error.lower()
     
     # CUDA 错误类型映射
@@ -725,13 +750,16 @@ def extract_cuda_error_details(error: str) -> tuple[str, str]:
     return "CUDA 错误", error
 
 
-def extract_compilation_error(error: str) -> str:
+def extract_compilation_error(error) -> str:
     """
     从 PyTorch load_inline 编译错误中提取有用的 nvcc 错误信息。
     
     过滤掉 Python 回溯，保留实际的编译错误。
     """
-    if not error:
+    # 确保 error 是字符串
+    if isinstance(error, Exception):
+        error = str(error)
+    if not error or not isinstance(error, str):
         return "未知编译错误"
     
     # nvcc 错误行模式
@@ -790,7 +818,7 @@ def extract_compilation_error(error: str) -> str:
     return result if result else error[:1000]
 
 
-def is_async_cuda_error_indicator(error: str) -> tuple[bool, str]:
+def is_async_cuda_error_indicator(error) -> tuple[bool, str]:
     """
     检测错误是否是异步 CUDA 错误的表现（在 PyTorch 调用处触发）。
     
@@ -804,6 +832,11 @@ def is_async_cuda_error_indicator(error: str) -> tuple[bool, str]:
     返回：
         (是否是异步错误, 错误类型描述)
     """
+    # 确保 error 是字符串
+    if isinstance(error, Exception):
+        error = str(error)
+    if not isinstance(error, str):
+        return False, ""
     error_lower = error.lower()
     
     # 检查是否包含 CUDA 错误关键词
@@ -833,13 +866,18 @@ def is_async_cuda_error_indicator(error: str) -> tuple[bool, str]:
     return False, ""
 
 
-def extract_cuda_kernel_error_location(error: str) -> str | None:
+def extract_cuda_kernel_error_location(error) -> str | None:
     """
     尝试从错误中提取 CUDA 内核代码的具体错误位置。
     
     如果找到具体的 CUDA 代码行号或内核名称，返回该信息。
     否则返回 None。
     """
+    # 确保 error 是字符串
+    if isinstance(error, Exception):
+        error = str(error)
+    if not isinstance(error, str):
+        return None
     lines = error.split('\n')
     
     # 查找 CUDA 内核相关的代码位置
@@ -866,7 +904,7 @@ def extract_cuda_kernel_error_location(error: str) -> str | None:
     return None
 
 
-def extract_runtime_error(error: str) -> str:
+def extract_runtime_error(error) -> str:
     """
     从运行时错误中提取有用的 CUDA 错误信息。
     
@@ -874,7 +912,10 @@ def extract_runtime_error(error: str) -> str:
     1. 异步 CUDA 错误（在 PyTorch 调用处触发）- 返回简洁提示
     2. 真正的 CUDA 内核代码错误 - 返回详细位置和错误信息
     """
-    if not error:
+    # 确保 error 是字符串
+    if isinstance(error, Exception):
+        error = str(error)
+    if not error or not isinstance(error, str):
         return "未知运行时错误"
     
     # 首先检查是否是 CUDA 错误
@@ -957,18 +998,21 @@ def extract_runtime_error(error: str) -> str:
     return '\n'.join(result_parts)
 
 
-def sanitize_error_message(error: str, error_type: str = "general") -> str:
+def sanitize_error_message(error, error_type: str = "general") -> str:
     """
     清理错误消息，保留技术细节但去除 Python 回溯噪音。
     
     参数：
-        error: 原始错误消息
+        error: 原始错误消息（字符串或异常对象）
         error_type: 错误类型 ("compilation", "runtime", "general")
     
     返回：
         清理后的错误消息，保留有用的技术细节
     """
-    if not error:
+    # 确保 error 是字符串
+    if isinstance(error, Exception):
+        error = str(error)
+    if not error or not isinstance(error, str):
         return "未知错误"
     
     # 根据错误类型使用专门的提取函数
@@ -1300,16 +1344,39 @@ def build_restart_prompt_for_length(
 # =============================================================================
 
 class ConversationState:
-    """管理对话状态，包括长度限制重启的段和 reasoning content。"""
+    """管理对话状态，包括长度限制重启的段和 reasoning content。
+    
+    使用字典存储所有分段的对话历史，key 为段索引，value 为对应对话消息列表。
+    当前活动的段由 segment_index 指示。
+    """
     
     def __init__(self, system_prompt: str = ""):
-        self.messages: list[dict] = []
-        self.turn_metrics: list[dict] = []
-        self.segment_index: int = 0
+        self.segment_index: int = 0  # 当前段索引
         self.segment_summaries: list[str] = []  # 每段的摘要
+        self.segments: dict[int, list[dict]] = {}  # 存储所有分段的对话历史 {segment_index: messages}
+        self.turn_metrics: list[dict] = []  # 所有轮的指标（跨段）
+        self.system_prompt: str = system_prompt
         
+        # 初始化第 0 段
+        self.segments[0] = []
         if system_prompt:
-            self.messages.append({"role": "system", "content": system_prompt})
+            self.segments[0].append({"role": "system", "content": system_prompt})
+    
+    @property
+    def messages(self) -> list[dict]:
+        """获取当前段的消息列表（向后兼容）。"""
+        return self.segments.get(self.segment_index, [])
+    
+    def get_all_messages(self) -> list[dict]:
+        """获取所有段的完整消息列表（按段顺序合并）。"""
+        all_messages = []
+        for seg_idx in sorted(self.segments.keys()):
+            all_messages.extend(self.segments[seg_idx])
+        return all_messages
+    
+    def get_segment_messages(self, segment_idx: int) -> list[dict]:
+        """获取指定段的消息列表。"""
+        return self.segments.get(segment_idx, [])
     
     def add_turn(
         self, 
@@ -1327,13 +1394,40 @@ class ConversationState:
             metric: 评估指标
             reasoning_content: 推理模型的思考内容（可选）
         """
-        self.messages.append({"role": "user", "content": user_content})
+        current_messages = self.segments.setdefault(self.segment_index, [])
+        current_messages.append({"role": "user", "content": user_content})
         assistant_msg = {"role": "assistant", "content": assistant_content}
         # 保存 reasoning_content 用于持久化，但不用于请求
         if reasoning_content:
             assistant_msg["reasoning_content"] = reasoning_content
-        self.messages.append(assistant_msg)
+        current_messages.append(assistant_msg)
         self.turn_metrics.append(metric)
+    
+    def update_last_metric(self, metric: dict):
+        """
+        更新最后一轮的评估指标。
+        安全地检查列表长度，如果列表为空则添加指标。
+        """
+        if self.turn_metrics:
+            self.turn_metrics[-1] = metric
+        else:
+            self.turn_metrics.append(metric)
+    
+    def validate_metrics(self) -> tuple[int, int]:
+        """
+        验证 turn_metrics 和对话轮数是否一致。
+        
+        返回：
+            (metric_count, turn_count) - 用于调试的计数
+        """
+        # 计算总对话轮数（所有段的 user-assistant 对）
+        total_turns = 0
+        for seg_idx, messages in self.segments.items():
+            # 排除 system 消息，只计算 user-assistant 对
+            user_assistant_count = sum(1 for m in messages if m.get("role") in ("user", "assistant"))
+            total_turns += user_assistant_count // 2  # 每轮包含 user + assistant
+        
+        return len(self.turn_metrics), total_turns
     
     def get_messages_for_request(self, include_reasoning: bool = False) -> list[dict]:
         """
@@ -1345,25 +1439,28 @@ class ConversationState:
         返回：
             用于 LLM 请求的消息列表
         """
+        current_messages = self.segments.get(self.segment_index, [])
         if include_reasoning:
-            return self.messages.copy()
+            return current_messages.copy()
         
         # 排除 reasoning_content 以节省 token
         filtered_messages = []
-        for msg in self.messages:
+        for msg in current_messages:
             msg_copy = msg.copy()
             if "reasoning_content" in msg_copy:
                 del msg_copy["reasoning_content"]
             filtered_messages.append(msg_copy)
         return filtered_messages
     
-    def restart_for_length(self, new_prompt: str, summary: str, reasoning_summary: str | None = None):
+    def restart_for_length(self, summary: str, reasoning_summary: str | None = None):
         """
         达到长度限制后重新开始对话。
-        保留段摘要作为上下文。
+        创建新的对话段，保留之前段的完整历史。
+        
+        注意：此方法只重置对话状态，不添加新的 prompt。
+        新的 prompt 应该通过 add_turn() 添加。
         
         参数：
-            new_prompt: 新的组合提示
             summary: 内容摘要
             reasoning_summary: 推理内容摘要（可选）
         """
@@ -1373,35 +1470,40 @@ class ConversationState:
             segment_summary = f"{summary}\n\n推理过程：{reasoning_summary[:500]}"
         self.segment_summaries.append(segment_summary)
         
-        # 增加段计数器
+        # 增加段计数器，创建新段
         self.segment_index += 1
+        self.segments[self.segment_index] = []
         
-        # 保留系统消息，开始新对话
-        system_msg = self.messages[0] if self.messages and self.messages[0].get("role") == "system" else None
-        self.messages = []
-        if system_msg:
-            self.messages.append(system_msg)
-        
-        # 将新的组合提示添加为第一个用户消息
-        self.messages.append({"role": "user", "content": new_prompt})
+        # 新段只保留系统消息
+        if self.system_prompt:
+            self.segments[self.segment_index].append({"role": "system", "content": self.system_prompt})
     
     def to_dict(self) -> dict:
         """将状态序列化为字典。"""
         return {
-            "messages": self.messages,
             "turn_metrics": self.turn_metrics,
             "segment_index": self.segment_index,
             "segment_summaries": self.segment_summaries,
+            "segments": self.segments,
+            "system_prompt": self.system_prompt,
         }
     
     @classmethod
     def from_dict(cls, data: dict) -> "ConversationState":
         """从字典恢复状态。"""
-        state = cls()
-        state.messages = data.get("messages", [])
+        # 使用保存的 system_prompt 初始化
+        system_prompt = data.get("system_prompt", "")
+        state = cls(system_prompt=system_prompt)
         state.turn_metrics = data.get("turn_metrics", [])
         state.segment_index = data.get("segment_index", 0)
         state.segment_summaries = data.get("segment_summaries", [])
+        # 恢复 segments，将字符串 key 转换回 int key
+        segments_data = data.get("segments", {})
+        if isinstance(segments_data, dict):
+            state.segments = {int(k): v for k, v in segments_data.items()}
+        elif isinstance(segments_data, list):
+            # 兼容旧格式（segments 是列表）
+            state.segments = {i: v for i, v in enumerate(segments_data)}
         return state
 
 
@@ -1509,9 +1611,11 @@ def generate_sample_multiturn_single(
                     kernel_code = f.read()
             
             # 从助手消息提取摘要（如果可用）
+            # 注意：需要从所有段的消息中查找
             summary = None
-            if i * 2 + 1 < len(state.messages):
-                assistant_msg = state.messages[i * 2 + 1].get("content", "")
+            all_messages = state.get_all_messages()
+            if i * 2 + 1 < len(all_messages):
+                assistant_msg = all_messages[i * 2 + 1].get("content", "")
                 summary = extract_summary_after_first_codeblock(assistant_msg)
             
             history.append(AttemptRecord(
@@ -1570,8 +1674,26 @@ def generate_sample_multiturn_single(
         kernel = extract_first_code(raw_str, ["python", "cpp"])
         summary = extract_summary_after_first_codeblock(raw_str)
         
-        # 处理长度限制 - 重新开始对话
-        if finish_reason == "length":
+        # 处理长度限制或上下文窗口超限 - 重新开始对话
+        needs_restart = finish_reason in ("length", "context_window_exceeded")
+        
+        if needs_restart:
+            # 根据错误类型确定错误信息
+            if finish_reason == "context_window_exceeded":
+                error_msg = "请求超出上下文窗口限制。对话历史过长或 prompt 太大。"
+                error_detail = getattr(response, 'error', error_msg)
+            else:
+                error_msg = "响应因达到 token 长度限制而被截断。模型生成的代码过长或推理过程过于详细。"
+                error_detail = error_msg
+            
+            # 首先记录触发 restart 的这一轮（即使被截断）
+            # 这确保了 turn_metrics 和对话历史保持一致
+            restart_eval_result = make_parsing_failure_result(
+                f"{error_msg} 即将重启对话。"
+            )
+            restart_metric = eval_result_to_turn_metric(turn, state.segment_index, restart_eval_result)
+            state.add_turn(user_content or "", raw_str, restart_metric, reasoning_content)
+            
             if state.segment_index >= config.max_conversation_segments - 1:
                 # 达到最大重启次数，视为失败
                 if config.verbose:
@@ -1579,42 +1701,46 @@ def generate_sample_multiturn_single(
                         f"[MultiTurn] 达到最大对话段数 "
                         f"level={config.level_label} problem={work.problem_id} sample={work.sample_id}"
                     )
-                # 将此尝试记录为失败
-                eval_result = make_parsing_failure_result(
-                    "响应因 token 限制被截断。已达到最大对话重启次数。"
-                )
-                metric = eval_result_to_turn_metric(turn, state.segment_index, eval_result)
-                state.add_turn(user_content or "", raw_str, metric, reasoning_content)
-                history.append(AttemptRecord(kernel_code=raw_str, summary=summary, eval_result=eval_result))
+                history.append(AttemptRecord(kernel_code=raw_str, summary=summary, eval_result=restart_eval_result))
                 save_conversation(run_dir, config.level_label, work.problem_id, work.sample_id, state)
                 continue
+            
+            # 获取上一轮模型给出的代码
+            # 如果 raw_str 为空（如 context_window_exceeded），则从 state 中获取上一轮的 assistant 回复
+            last_code = raw_str
+            if not last_code and state.turn_metrics:
+                # 从当前段的消息中获取最近一轮的 assistant 回复
+                current_messages = state.get_segment_messages(state.segment_index)
+                # 找到最后一个 assistant 消息
+                for msg in reversed(current_messages):
+                    if msg.get("role") == "assistant":
+                        last_code = msg.get("content", "")
+                        break
             
             # 构造包含完整信息的 restart prompt
             # 包含：原始题目 + 上一轮代码 + 失败原因 + 历史 summary
             restart_prompt_text = build_restart_prompt_for_length(
                 base_prompt=base_prompt,
-                last_code=raw_str,  # 上一轮模型给出的代码（可能被截断）
-                last_error="响应因达到 token 长度限制而被截断。模型生成的代码过长或推理过程过于详细。",
+                last_code=last_code,  # 上一轮模型给出的代码
+                last_error=error_detail,
                 history=history,
                 segment_summaries=state.segment_summaries,
             )
             
-            # 重新开始对话
-            state.restart_for_length(restart_prompt_text, summary or "", reasoning_content)
+            # 重新开始对话（只重置状态，不添加 prompt）
+            state.restart_for_length(summary or "", reasoning_content)
             
             if config.verbose:
+                restart_reason = "上下文窗口超限" if finish_reason == "context_window_exceeded" else "长度限制"
                 print(
-                    f"[MultiTurn] 因长度限制重启对话 "
+                    f"[MultiTurn] 因{restart_reason}重启对话 "
                     f"level={config.level_label} problem={work.problem_id} sample={work.sample_id} "
                     f"(segment {state.segment_index})"
                 )
             
-            # 保存状态
-            save_conversation(run_dir, config.level_label, work.problem_id, work.sample_id, state)
-            
-            # 重要：使用新的对话立即重新尝试当前 turn，而不是继续到下一轮
-            # 重新构造消息并查询 LLM
+            # 构造消息：系统消息 + restart_prompt 作为 user 消息
             messages_to_send = state.get_messages_for_request(include_reasoning=False)
+            messages_to_send.append({"role": "user", "content": restart_prompt_text})
             
             # 记录 restart 后的 prompt
             if config.log_prompt:
@@ -1635,35 +1761,43 @@ def generate_sample_multiturn_single(
             kernel = extract_first_code(raw_str, ["python", "cpp"])
             summary = extract_summary_after_first_codeblock(raw_str)
             
-            # 如果再次遇到 length 且超过限制，则放弃
-            if finish_reason == "length":
-                if config.verbose:
-                    print(
-                        f"[MultiTurn] 重启后仍然遇到长度限制，放弃当前 turn "
-                        f"level={config.level_label} problem={work.problem_id} sample={work.sample_id}"
-                    )
-                eval_result = make_parsing_failure_result(
-                    "重启对话后响应仍因 token 限制被截断。请尝试简化代码或缩短推理过程。"
-                )
-                metric = eval_result_to_turn_metric(turn, state.segment_index, eval_result)
-                state.add_turn(restart_prompt_text, raw_str, metric, reasoning_content)
-                history.append(AttemptRecord(kernel_code=raw_str, summary=summary, eval_result=eval_result))
-                save_conversation(run_dir, config.level_label, work.problem_id, work.sample_id, state)
-                continue
-            
             # restart 成功，将 turn 添加到对话（使用 restart_prompt_text 作为 user_content）
+            # 注意：此时还没有评估结果，metric 会在评估后更新
             state.add_turn(restart_prompt_text, raw_str, {}, reasoning_content)
             
+            # 如果 restart 后再次遇到 length/context_window_exceeded，记录警告
+            if finish_reason in ("length", "context_window_exceeded"):
+                if config.verbose:
+                    print(
+                        f"[MultiTurn] 警告：重启后仍然遇到 {finish_reason}，将尝试评估截断内容 "
+                        f"level={config.level_label} problem={work.problem_id} sample={work.sample_id}"
+                    )
+            
         else:
-            # 正常流程（非 length 情况）- 将轮次添加到对话
+            # 正常流程（非 length/context_window_exceeded 情况）- 将轮次添加到对话
             if user_content is not None:
                 state.add_turn(user_content, raw_str, {}, reasoning_content)  # 指标将在评估后更新
+        
+        # 处理其他 LLM 错误
+        if finish_reason == "error":
+            error_msg = getattr(response, 'error', 'LLM 调用失败')
+            if config.verbose:
+                print(
+                    f"[MultiTurn] LLM 调用失败 "
+                    f"level={config.level_label} problem={work.problem_id} sample={work.sample_id}: {error_msg}"
+                )
+            eval_result = make_parsing_failure_result(f"LLM 调用失败: {error_msg}")
+            metric = eval_result_to_turn_metric(turn, state.segment_index, eval_result)
+            state.update_last_metric(metric)
+            history.append(AttemptRecord(kernel_code=raw_str or "<空>", summary=summary, eval_result=eval_result))
+            save_conversation(run_dir, config.level_label, work.problem_id, work.sample_id, state)
+            continue
         
         # 处理解析失败
         if not kernel:
             eval_result = make_parsing_failure_result("响应中未找到围栏代码块。")
             metric = eval_result_to_turn_metric(turn, state.segment_index, eval_result)
-            state.turn_metrics[-1] = metric  # 更新指标
+            state.update_last_metric(metric)  # 更新指标
             history.append(AttemptRecord(kernel_code=raw_str or "<空>", summary=summary, eval_result=eval_result))
             save_conversation(run_dir, config.level_label, work.problem_id, work.sample_id, state)
             continue
@@ -1682,7 +1816,7 @@ def generate_sample_multiturn_single(
             if not ok:
                 eval_result = make_parsing_failure_result(f"静态检查失败：{error}。警告：{warnings}")
                 metric = eval_result_to_turn_metric(turn, state.segment_index, eval_result)
-                state.turn_metrics[-1] = metric
+                state.update_last_metric(metric)
                 history.append(AttemptRecord(kernel_code=kernel, summary=summary, eval_result=eval_result))
                 save_conversation(run_dir, config.level_label, work.problem_id, work.sample_id, state)
                 continue
@@ -1702,7 +1836,7 @@ def generate_sample_multiturn_single(
         
         # 更新指标
         metric = eval_result_to_turn_metric(turn, state.segment_index, eval_result)
-        state.turn_metrics[-1] = metric
+        state.update_last_metric(metric)
         
         if config.verbose:
             print(
@@ -1726,6 +1860,8 @@ def generate_sample_multiturn_single(
     
     # 最终内核输出
     if last_kernel is None:
+        # 保存对话状态后再抛出异常
+        save_conversation(run_dir, config.level_label, work.problem_id, work.sample_id, state)
         raise RuntimeError(
             f"所有轮次都未能生成可解析的代码 problem {work.problem_id}: {problem_name}"
         )
