@@ -716,6 +716,45 @@ def register_and_format_exception(
     return metadata
 
 
+def _scale_down_inputs_if_needed(inputs: list, verbose: bool = False) -> list:
+    """
+    如果设置了环境变量 KERNELBENCH_SCALE_DOWN_INPUTS，则缩小输入尺寸。
+    
+    用于内存不足时减小输入尺寸以避免 OOM。
+    """
+    if os.environ.get("KERNELBENCH_SCALE_DOWN_INPUTS", "").lower() not in ("1", "true", "yes"):
+        return inputs
+    
+    max_batch = int(os.environ.get("KERNELBENCH_SCALE_MAX_BATCH", "2"))
+    max_channels = int(os.environ.get("KERNELBENCH_SCALE_MAX_CHANNELS", "8"))
+    max_spatial = int(os.environ.get("KERNELBENCH_SCALE_MAX_SPATIAL", "256"))
+    
+    scaled_inputs = []
+    for x in inputs:
+        if isinstance(x, torch.Tensor):
+            if x.dim() == 4:
+                # 4D 张量 (batch, channels, height, width)
+                b = min(x.size(0), max_batch)
+                c = min(x.size(1), max_channels)
+                h = min(x.size(2), max_spatial)
+                w = min(x.size(3), max_spatial)
+                x = x[:b, :c, :h, :w]
+                if verbose:
+                    print(f"[Eval] Scaled 4D input to: {x.shape}")
+            elif x.dim() == 3:
+                d0 = min(x.size(0), max_batch)
+                d1 = min(x.size(1), max_channels)
+                d2 = min(x.size(2), max_spatial)
+                x = x[:d0, :d1, :d2]
+            elif x.dim() == 2:
+                d0 = min(x.size(0), max_spatial)
+                d1 = min(x.size(1), max_spatial)
+                x = x[:d0, :d1]
+        scaled_inputs.append(x)
+    
+    return scaled_inputs
+
+
 def run_and_check_correctness(
     original_model_instance: nn.Module,
     new_model_instance: nn.Module,
@@ -736,6 +775,13 @@ def run_and_check_correctness(
     num_correct_trials: run the evalutation multiple times with (ideally) different random inputs to ensure correctness
     backend: backend type for handling dtype conversions
     precision: torch.dtype
+    
+    NOTE: Uses isolated execution - reference model and custom model run separately
+    with outputs moved to CPU before comparison to avoid CUDA context pollution.
+    
+    NOTE: If KERNELBENCH_SCALE_DOWN_INPUTS environment variable is set to "1"/"true"/"yes",
+    inputs will be scaled down according to KERNELBENCH_SCALE_MAX_BATCH, 
+    KERNELBENCH_SCALE_MAX_CHANNELS, and KERNELBENCH_SCALE_MAX_SPATIAL.
     """
     pass_count = 0
 
@@ -745,86 +791,159 @@ def run_and_check_correctness(
         torch.randint(0, 2**32 - 1, (1,)).item() for _ in range(num_correct_trials)
     ]
 
-    with torch.no_grad():
+    for trial in range(num_correct_trials):
+        trial_seed = correctness_trial_seeds[trial]
+        if verbose:
+            print(f"[Eval] Generating Random Input with seed {trial_seed}")
 
-        for trial in range(num_correct_trials):
+        set_seed(trial_seed)
+        inputs = get_inputs_fn()
+        # Convert inputs to appropriate dtypes for GPU computation
+        inputs = [_process_input_tensor(x, device, backend, precision) for x in inputs]
+        
+        # Scale down inputs if needed (for memory-constrained environments)
+        inputs = _scale_down_inputs_if_needed(inputs, verbose)
 
-            trial_seed = correctness_trial_seeds[trial]
-            if verbose:
-                print(f"[Eval] Generating Random Input with seed {trial_seed}")
+        # ========== Run Reference Model (Isolated) ==========
+        try:
+            with torch.no_grad():
+                set_seed(trial_seed)
+                model = original_model_instance.to(device=device, dtype=precision)
+                output = model(*inputs)
+                torch.cuda.synchronize(device=device)
+                
+                # Move output to CPU immediately and clear GPU memory
+                output_cpu = output.cpu().clone()
+                del output, model
+                
+            # Clear CUDA cache after reference model
+            torch.cuda.empty_cache()
+            
+        except Exception as e:
+            print("[Error] Exception in reference model execution")
+            traceback.print_exc()
+            metadata = register_and_format_exception(
+                "runtime_error", e, metadata, truncate=True
+            )
+            metadata["runtime_error_name"] = get_error_name(e)
+            return KernelExecResult(
+                compiled=True, correctness=False, metadata=metadata
+            )
 
-            set_seed(trial_seed)
-            inputs = get_inputs_fn()
-            # Convert inputs to appropriate dtypes for GPU computation
-            inputs = [_process_input_tensor(x, device, backend, precision) for x in inputs]
-
-            set_seed(trial_seed)
-    
-            model = original_model_instance.to(device=device, dtype=precision)
-
-            set_seed(trial_seed)
-     
-            model_new = new_model_instance.to(device=device, dtype=precision)
-
-            output = model(*inputs)
-            torch.cuda.synchronize(device=device)
-            # ensure all GPU operations are completed before checking results
-
-            try:
+        # ========== Run Custom Model (Isolated) ==========
+        try:
+            with torch.no_grad():
+                set_seed(trial_seed)
+                model_new = new_model_instance.to(device=device, dtype=precision)
                 output_new = model_new(*inputs)
                 torch.cuda.synchronize(device=device)
-                if output.shape != output_new.shape:
-                    metadata = register_and_format_exception(
-                        "correctness_issue",
-                        f"Output shape mismatch: Expected {output.shape}, got {output_new.shape}",
-                        metadata,
-                    )
-                    metadata["correctness_issue_name"] = "correctness_issue"
-                    if verbose:
-                        print(
-                            f"[FAIL] trial {trial}: Output shape mismatch: Expected {output.shape}, got {output_new.shape}"
-                        )
-                    return KernelExecResult(
-                        compiled=True, correctness=False, metadata=metadata
-                    )
+                
+                # Move output to CPU immediately
+                output_new_cpu = output_new.cpu().clone()
+                del output_new, model_new
+                
+            # Clear CUDA cache after custom model
+            torch.cuda.empty_cache()
+            
+        except Exception as e:
+            print("[Error] Exception happens during correctness check")
+            print(f"Error in launching kernel for ModelNew: {e}")
+            print("\n[Full Traceback]:")
+            traceback.print_exc()
+            print("\n")
 
-                # in torchbench, they use both precisions for atol and rtol
-                # kernelbench v0 and v0.1 uses fp32, atol = rtol = 1e-02
-                # now we will return the tolerance from get_tolerance_for_precision
-                tolerance = get_tolerance_for_precision(precision)
-                # check output value difference
-                if not torch.allclose(
-                    output, output_new, atol=tolerance, rtol=tolerance
-                ):  # fail
-                    max_diff = torch.max(torch.abs(output - output_new)).item()
-                    avg_diff = torch.mean(torch.abs(output - output_new)).item()
-                    metadata.setdefault("max_difference", []).append(f"{max_diff:.6f}")
-                    metadata.setdefault("avg_difference", []).append(f"{avg_diff:.6f}")
-                    metadata["correctness_issue"] = "Output mismatch"
-                    if verbose:
-                        print(f"[FAIL] trial {trial}: Output mismatch")
-                else:  # pass
-                    pass_count += 1
-                    if verbose:
-                        print(f"[PASS] trial {trial}: New Model matches Model")
+            metadata = register_and_format_exception(
+                "runtime_error", e, metadata, truncate=True
+            )
+            metadata["runtime_error_name"] = get_error_name(e)
+            # Also store the full traceback in metadata for debugging
+            metadata["runtime_error_traceback"] = traceback.format_exc()
+            return KernelExecResult(
+                compiled=True, correctness=False, metadata=metadata
+            )
 
-            except Exception as e:
-                print("[Error] Exception happens during correctness check")
-                print(f"Error in launching kernel for ModelNew: {e}")
-                print("\n[Full Traceback]:")
-                traceback.print_exc()
-                print("\n")
-
-                metadata = register_and_format_exception(
-                    "runtime_error", e, metadata, truncate=True
+        # ========== Compare Results (on CPU) ==========
+        # ensure all GPU operations are completed before checking results
+        torch.cuda.synchronize(device=device)
+        
+        if output_cpu.shape != output_new_cpu.shape:
+            metadata = register_and_format_exception(
+                "correctness_issue",
+                f"Output shape mismatch: Expected {output_cpu.shape}, got {output_new_cpu.shape}",
+                metadata,
+            )
+            metadata["correctness_issue_name"] = "correctness_issue"
+            if verbose:
+                print(
+                    f"[FAIL] trial {trial}: Output shape mismatch: Expected {output_cpu.shape}, got {output_new_cpu.shape}"
                 )
-                metadata["runtime_error_name"] = get_error_name(e)
-                # Also store the full traceback in metadata for debugging
-                metadata["runtime_error_traceback"] = traceback.format_exc()
-                return KernelExecResult(
-                    compiled=True, correctness=False, metadata=metadata
-                )
-                # break
+            return KernelExecResult(
+                compiled=True, correctness=False, metadata=metadata
+            )
+
+        # in torchbench, they use both precisions for atol and rtol
+        # kernelbench v0 and v0.1 uses fp32, atol = rtol = 1e-02
+        # now we will return the tolerance from get_tolerance_for_precision
+        tolerance = get_tolerance_for_precision(precision)
+        # check output value difference (on CPU)
+        if not torch.allclose(
+            output_cpu, output_new_cpu, atol=tolerance, rtol=tolerance
+        ):  # fail
+            max_diff = torch.max(torch.abs(output_cpu - output_new_cpu)).item()
+            avg_diff = torch.mean(torch.abs(output_cpu - output_new_cpu)).item()
+            median_diff = torch.median(torch.abs(output_cpu - output_new_cpu)).item()
+            
+            # Store detailed mismatch information for feedback
+            metadata.setdefault("max_difference", []).append(f"{max_diff:.6f}")
+            metadata.setdefault("avg_difference", []).append(f"{avg_diff:.6f}")
+            metadata.setdefault("median_difference", []).append(f"{median_diff:.6f}")
+            metadata["correctness_issue"] = "Output mismatch"
+            
+            # Store shape information
+            metadata["ref_output_shape"] = str(output_cpu.shape)
+            metadata["custom_output_shape"] = str(output_new_cpu.shape)
+            
+            # Store value ranges
+            metadata["ref_output_min"] = f"{output_cpu.min().item():.6f}"
+            metadata["ref_output_max"] = f"{output_cpu.max().item():.6f}"
+            metadata["custom_output_min"] = f"{output_new_cpu.min().item():.6f}"
+            metadata["custom_output_max"] = f"{output_new_cpu.max().item():.6f}"
+            
+            # Store tolerance information
+            metadata["tolerance_atol"] = f"{tolerance:.6f}"
+            metadata["tolerance_rtol"] = f"{tolerance:.6f}"
+            
+            # Store sample differences (first 5 locations with significant differences)
+            diff_mask = torch.abs(output_cpu - output_new_cpu) > tolerance
+            if diff_mask.any():
+                diff_indices = torch.where(diff_mask)
+                num_diffs = min(5, len(diff_indices[0]))
+                sample_diffs = []
+                for i in range(num_diffs):
+                    idx = tuple(idx_tensor[i].item() for idx_tensor in diff_indices)
+                    ref_val = output_cpu[idx].item()
+                    custom_val = output_new_cpu[idx].item()
+                    diff_val = abs(ref_val - custom_val)
+                    sample_diffs.append({
+                        "index": idx,
+                        "ref": f"{ref_val:.6f}",
+                        "custom": f"{custom_val:.6f}",
+                        "diff": f"{diff_val:.6f}"
+                    })
+                metadata["sample_differences"] = sample_diffs
+            
+            if verbose:
+                print(f"[FAIL] trial {trial}: Output mismatch")
+                print(f"  Max difference: {max_diff:.6f}")
+                print(f"  Avg difference: {avg_diff:.6f}")
+                print(f"  Tolerance: {tolerance:.6f}")
+        else:  # pass
+            pass_count += 1
+            if verbose:
+                print(f"[PASS] trial {trial}: New Model matches Model")
+
+        # Clean up CPU tensors
+        del output_cpu, output_new_cpu
 
     if verbose:
         print(
