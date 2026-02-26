@@ -523,8 +523,8 @@ def _query_server_with_finish_reason(
         if "openai/" not in model_name.lower() and "gpt" not in model_name.lower():
             completion_kwargs["top_k"] = top_k
     
-    # 如果需要，添加托管 vLLM 参数
-    if model_name.startswith("hosted_vllm/") or "HOSTED_VLLM_API_BASE" in os.environ:
+    # 如果需要，添加托管 vLLM 参数（仅对 hosted_vllm 模型）
+    if model_name.startswith("hosted_vllm/"):
         api_base = os.environ.get("HOSTED_VLLM_API_BASE", "")
         host = os.environ.get("HOSTED_VLLM_HOST", "")
         if api_base:
@@ -1513,12 +1513,22 @@ def save_conversation(
     problem_id: int,
     sample_id: int,
     state: ConversationState,
+    verbose: bool = False,
 ) -> None:
     """将对话状态保存到 JSON。"""
     conv_path = os.path.join(
         run_dir,
         f"level_{level_label}_problem_{problem_id}_sample_{sample_id}_conversation.json",
     )
+    
+    # 验证 metrics 和对话轮数是否一致
+    metric_count, turn_count = state.validate_metrics()
+    if metric_count != turn_count and verbose:
+        print(
+            f"[Warning] Metrics ({metric_count}) 和对话轮数 ({turn_count}) 不匹配! "
+            f"level={level_label} problem={problem_id} sample={sample_id}"
+        )
+    
     with open(conv_path, "w", encoding="utf-8") as f:
         json.dump(state.to_dict(), f, ensure_ascii=False, indent=2)
 
@@ -1638,7 +1648,12 @@ def generate_sample_multiturn_single(
     
     last_kernel: Optional[str] = None
     
-    for turn in range(start_turn, config.max_turns):
+    # 使用独立的 turn 计数器，确保 turn 编号连续递增
+    current_turn = start_turn
+    
+    for _ in range(start_turn, config.max_turns):
+        turn = current_turn
+        
         # 确定本轮的用户内容
         if turn == 0:
             user_content = base_prompt.rstrip() + first_turn_suffix
@@ -1686,48 +1701,49 @@ def generate_sample_multiturn_single(
                 error_msg = "响应因达到 token 长度限制而被截断。模型生成的代码过长或推理过程过于详细。"
                 error_detail = error_msg
             
-            # 首先记录触发 restart 的这一轮（即使被截断）
-            # 这确保了 turn_metrics 和对话历史保持一致
+            # 记录触发 restart 的这一轮（标记为生成失败）
+            # 添加 generation_failed 字段以区分正常评估失败
             restart_eval_result = make_parsing_failure_result(
                 f"{error_msg} 即将重启对话。"
             )
             restart_metric = eval_result_to_turn_metric(turn, state.segment_index, restart_eval_result)
+            restart_metric["generation_failed"] = True  # 标记为生成阶段失败
+            restart_metric["generation_error"] = error_msg
             state.add_turn(user_content or "", raw_str, restart_metric, reasoning_content)
             
+            # 立即保存，确保触发 restart 的轮次被记录
+            save_conversation(run_dir, config.level_label, work.problem_id, work.sample_id, state, config.verbose)
+            
             if state.segment_index >= config.max_conversation_segments - 1:
-                # 达到最大重启次数，视为失败
+                # 达到最大重启次数，视为本轮失败
                 if config.verbose:
                     print(
                         f"[MultiTurn] 达到最大对话段数 "
                         f"level={config.level_label} problem={work.problem_id} sample={work.sample_id}"
                     )
                 history.append(AttemptRecord(kernel_code=raw_str, summary=summary, eval_result=restart_eval_result))
-                save_conversation(run_dir, config.level_label, work.problem_id, work.sample_id, state)
+                save_conversation(run_dir, config.level_label, work.problem_id, work.sample_id, state, config.verbose)
                 continue
             
             # 获取上一轮模型给出的代码
-            # 如果 raw_str 为空（如 context_window_exceeded），则从 state 中获取上一轮的 assistant 回复
             last_code = raw_str
             if not last_code and state.turn_metrics:
-                # 从当前段的消息中获取最近一轮的 assistant 回复
                 current_messages = state.get_segment_messages(state.segment_index)
-                # 找到最后一个 assistant 消息
                 for msg in reversed(current_messages):
                     if msg.get("role") == "assistant":
                         last_code = msg.get("content", "")
                         break
             
-            # 构造包含完整信息的 restart prompt
-            # 包含：原始题目 + 上一轮代码 + 失败原因 + 历史 summary
+            # 构造 restart prompt
             restart_prompt_text = build_restart_prompt_for_length(
                 base_prompt=base_prompt,
-                last_code=last_code,  # 上一轮模型给出的代码
+                last_code=last_code,
                 last_error=error_detail,
                 history=history,
                 segment_summaries=state.segment_summaries,
             )
             
-            # 重新开始对话（只重置状态，不添加 prompt）
+            # 重新开始对话
             state.restart_for_length(summary or "", reasoning_content)
             
             if config.verbose:
@@ -1761,9 +1777,10 @@ def generate_sample_multiturn_single(
             kernel = extract_first_code(raw_str, ["python", "cpp"])
             summary = extract_summary_after_first_codeblock(raw_str)
             
-            # restart 成功，将 turn 添加到对话（使用 restart_prompt_text 作为 user_content）
-            # 注意：此时还没有评估结果，metric 会在评估后更新
-            state.add_turn(restart_prompt_text, raw_str, {}, reasoning_content)
+            # restart 消耗一个 turn 编号，为新尝试递增
+            current_turn += 1
+            # 更新 turn 变量以使用新的 turn 编号
+            turn = current_turn
             
             # 如果 restart 后再次遇到 length/context_window_exceeded，记录警告
             if finish_reason in ("length", "context_window_exceeded"):
@@ -1773,10 +1790,19 @@ def generate_sample_multiturn_single(
                         f"level={config.level_label} problem={work.problem_id} sample={work.sample_id}"
                     )
             
+            # 添加 restart 后的新 turn（使用新的 turn 编号，此时还没有评估结果）
+            state.add_turn(restart_prompt_text, raw_str, {}, reasoning_content)
+            
+            # 立即保存 restart 后的对话状态
+            save_conversation(run_dir, config.level_label, work.problem_id, work.sample_id, state, config.verbose)
+            
         else:
             # 正常流程（非 length/context_window_exceeded 情况）- 将轮次添加到对话
             if user_content is not None:
                 state.add_turn(user_content, raw_str, {}, reasoning_content)  # 指标将在评估后更新
+            
+            # 立即保存对话状态，确保每轮都被记录
+            save_conversation(run_dir, config.level_label, work.problem_id, work.sample_id, state, config.verbose)
         
         # 处理其他 LLM 错误
         if finish_reason == "error":
@@ -1790,7 +1816,7 @@ def generate_sample_multiturn_single(
             metric = eval_result_to_turn_metric(turn, state.segment_index, eval_result)
             state.update_last_metric(metric)
             history.append(AttemptRecord(kernel_code=raw_str or "<空>", summary=summary, eval_result=eval_result))
-            save_conversation(run_dir, config.level_label, work.problem_id, work.sample_id, state)
+            save_conversation(run_dir, config.level_label, work.problem_id, work.sample_id, state, config.verbose)
             continue
         
         # 处理解析失败
@@ -1799,7 +1825,7 @@ def generate_sample_multiturn_single(
             metric = eval_result_to_turn_metric(turn, state.segment_index, eval_result)
             state.update_last_metric(metric)  # 更新指标
             history.append(AttemptRecord(kernel_code=raw_str or "<空>", summary=summary, eval_result=eval_result))
-            save_conversation(run_dir, config.level_label, work.problem_id, work.sample_id, state)
+            save_conversation(run_dir, config.level_label, work.problem_id, work.sample_id, state, config.verbose)
             continue
         
         # 保存轮次内核
@@ -1818,7 +1844,7 @@ def generate_sample_multiturn_single(
                 metric = eval_result_to_turn_metric(turn, state.segment_index, eval_result)
                 state.update_last_metric(metric)
                 history.append(AttemptRecord(kernel_code=kernel, summary=summary, eval_result=eval_result))
-                save_conversation(run_dir, config.level_label, work.problem_id, work.sample_id, state)
+                save_conversation(run_dir, config.level_label, work.problem_id, work.sample_id, state, config.verbose)
                 continue
         
         last_kernel = kernel
@@ -1846,7 +1872,7 @@ def generate_sample_multiturn_single(
             )
         
         history.append(AttemptRecord(kernel_code=kernel, summary=summary, eval_result=eval_result))
-        save_conversation(run_dir, config.level_label, work.problem_id, work.sample_id, state)
+        save_conversation(run_dir, config.level_label, work.problem_id, work.sample_id, state, config.verbose)
         
         # 每轮结束后清理内存
         cleanup_cuda_memory()
@@ -1854,6 +1880,9 @@ def generate_sample_multiturn_single(
         # 成功时提前停止
         if config.early_stop_on_correct and eval_result.compiled and eval_result.correctness:
             break
+        
+        # 正常完成一轮，递增 turn 计数器
+        current_turn += 1
     
     # 最终清理
     cleanup_cuda_memory()
@@ -1861,7 +1890,7 @@ def generate_sample_multiturn_single(
     # 最终内核输出
     if last_kernel is None:
         # 保存对话状态后再抛出异常
-        save_conversation(run_dir, config.level_label, work.problem_id, work.sample_id, state)
+        save_conversation(run_dir, config.level_label, work.problem_id, work.sample_id, state, config.verbose)
         raise RuntimeError(
             f"所有轮次都未能生成可解析的代码 problem {work.problem_id}: {problem_name}"
         )

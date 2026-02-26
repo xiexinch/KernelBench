@@ -168,7 +168,9 @@ def query_server(
         if is_reasoning_model:
             # reasoning_effort 仅 OpenAI o1/o3 支持；Anthropic 等会报 UnsupportedParamsError
             if reasoning_effort and (
-                "openai" in model_name.lower() or "o1" in model_name or "o3" in model_name
+                "openai" in model_name.lower()
+                or "o1" in model_name
+                or "o3" in model_name
             ):
                 completion_kwargs["reasoning_effort"] = reasoning_effort
             # Claude extended thinking uses "thinking" parameter with dict structure
@@ -264,6 +266,12 @@ SERVER_PRESETS = {
         "model_name": "dashscope/qwen3-max-2026-01-23",
         "temperature": 0.7,
         "max_tokens": 65536,
+    },
+    "moonshot": {
+        "model_name": "moonshot/kimi-k2.5",
+        "temperature": 1,
+        "max_tokens": 262144,
+        "top_p": 0.95,
     },
 }
 
