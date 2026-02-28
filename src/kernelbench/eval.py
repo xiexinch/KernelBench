@@ -548,12 +548,8 @@ def eval_kernel_against_ref(
             custom_model = ModelNew(*init_inputs)
             assert hasattr(custom_model, "forward")
             original_model = original_model.to(device=device, dtype=precision)
-            # For CUDA backend with custom kernels (load_inline), keep weights as float32
-            # because the kernel code is hardcoded for float32. Only convert inputs.
-            if backend.lower() == "cuda":
-                custom_model = custom_model.to(device=device, dtype=torch.float32)
-            else:
-                custom_model = custom_model.to(device=device, dtype=precision)
+            # Use the user-specified precision for both models
+            custom_model = custom_model.to(device=device, dtype=precision)
             torch.cuda.synchronize(device=device)
         if verbose:
             print("[Eval] New Model with Custom CUDA Kernel Loaded")
@@ -605,13 +601,10 @@ def eval_kernel_against_ref(
                 torch.cuda.synchronize(device=device)
                 set_seed(seed_num)
                 inputs = get_inputs()
-                # Convert inputs for performance measurement
-                # For CUDA backend with custom kernels, use float32 since kernels are hardcoded for float
-                input_precision = torch.float32 if backend.lower() == "cuda" else precision
-                inputs = [_process_input_tensor(x, device, backend, input_precision) for x in inputs]
+                # Convert inputs for performance measurement using the specified precision
+                inputs = [_process_input_tensor(x, device, backend, precision) for x in inputs]
                 
-                # For CUDA backend with custom kernels, keep model in float32
-                # Model already has correct dtype from earlier setup
+                # Use the model with the correct dtype from earlier setup
                 model_new = custom_model.to(device=device)
                 torch.cuda.synchronize(device=device)
 
@@ -807,10 +800,8 @@ def run_and_check_correctness(
 
         set_seed(trial_seed)
         inputs = get_inputs_fn()
-        # Convert inputs to appropriate dtypes for GPU computation
-        # For CUDA backend with custom kernels, use float32 since kernels are hardcoded for float
-        input_precision = torch.float32 if backend.lower() == "cuda" else precision
-        inputs = [_process_input_tensor(x, device, backend, input_precision) for x in inputs]
+        # Convert inputs to appropriate dtypes for GPU computation using the specified precision
+        inputs = [_process_input_tensor(x, device, backend, precision) for x in inputs]
         
         # Scale down inputs if needed (for memory-constrained environments)
         inputs = _scale_down_inputs_if_needed(inputs, verbose)
